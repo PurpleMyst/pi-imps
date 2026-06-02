@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { AgentSession, Extension, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
@@ -293,33 +293,32 @@ export function shouldIncludeExtension(
 /**
  * Resolve the package name of an extension.
  *
- * Package extensions: read name from baseDir/package.json.
- * Top-level extensions: extract segment after baseDir/extensions/,
- * try package.json in that dir, fall back to segment name.
+ * Walks up the directory tree from `ext.resolvedPath` (falling back to
+ * `ext.path`) looking for the nearest `package.json` and returns its `name`
+ * field.  This is independent of `ext.sourceInfo`, which may not yet have
+ * been populated by `applyExtensionSourceInfo()` at the time the
+ * `extensionsOverride` callback fires.
+ *
+ * Falls back to the resolved file's basename without `.ts` if no
+ * `package.json` is found anywhere up to the filesystem root.
  */
 export function getExtensionPackageName(ext: Extension): string | undefined {
-  const si = ext.sourceInfo;
+  const resolvedPath = ext.resolvedPath || ext.path;
+  if (!resolvedPath) return undefined;
 
-  // Package extensions: read from baseDir/package.json
-  if (si.origin === "package" && si.baseDir) {
-    return readPackageName(join(si.baseDir, "package.json"));
+  // Walk up from the file's directory to find the nearest package.json
+  let dir = dirname(resolvedPath);
+  for (;;) {
+    const pkgName = readPackageName(join(dir, "package.json"));
+    if (pkgName !== undefined) return pkgName;
+    const parent = dirname(dir);
+    if (parent === dir) break; // reached filesystem root
+    dir = parent;
   }
 
-  // Top-level: extract segment after baseDir/extensions/
-  if (si.baseDir) {
-    const baseDir = si.baseDir.replace(/\\/g, "/");
-    const sourcePath = si.path.replace(/\\/g, "/");
-    const prefix = `${baseDir}/extensions/`;
-    if (sourcePath.startsWith(prefix)) {
-      const segment = sourcePath.slice(prefix.length).split("/")[0];
-      const pkgName = readPackageName(join(si.baseDir, "extensions", segment, "package.json"));
-      if (pkgName) return pkgName;
-      // Single-file extension: use filename without .ts
-      return segment.replace(/\.ts$/, "");
-    }
-  }
-
-  return undefined;
+  // Fallback: filename without .ts
+  const base = basename(resolvedPath);
+  return base.replace(/\.ts$/, "") || undefined;
 }
 
 function readPackageName(path: string): string | undefined {
