@@ -1,7 +1,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ImpSnapshot } from "./types.js";
 
-const SUMMON_TASK_PREVIEW_LENGTH = 80;
+const SUMMON_TASK_PREVIEW_LINES = 3;
+const SUMMON_TASK_PREVIEW_WIDTH = 96;
 const SPINNER = "·•✧✦✧•";
 
 function formatTokens(n: number): string {
@@ -57,18 +59,26 @@ export function formatSummonCall(
   agent: string | undefined,
   model: string | undefined,
   thinking: string | undefined,
+  expanded: boolean,
+  expandHint: string,
+  collapseHint: string,
   theme: Theme,
 ): string {
   const target = agent ? theme.fg("accent", agent) : theme.fg("muted", "ephemeral");
   const options = [model, thinking].filter((option): option is string => Boolean(option));
   const metadata = options.length > 0 ? theme.fg("muted", ` [${options.join(" · ")}]`) : "";
-  const normalizedTask = task?.replace(/\s+/g, " ").trim() ?? "";
-  const preview =
-    normalizedTask.length > SUMMON_TASK_PREVIEW_LENGTH
-      ? `${normalizedTask.slice(0, SUMMON_TASK_PREVIEW_LENGTH)}…`
-      : normalizedTask || "...";
+  const taskLines = wrapTextWithAnsi(task?.trim() || "...", SUMMON_TASK_PREVIEW_WIDTH);
+  const visibleLines = expanded ? taskLines : taskLines.slice(0, SUMMON_TASK_PREVIEW_LINES);
+  const prompt = visibleLines.map((line) => `  ${theme.fg("dim", line)}`).join("\n");
+  const isTruncated = taskLines.length > SUMMON_TASK_PREVIEW_LINES;
+  const hint =
+    !expanded && isTruncated
+      ? `\n  ${theme.fg("muted", `… ${taskLines.length - SUMMON_TASK_PREVIEW_LINES} more lines`)} (${expandHint})`
+      : expanded && isTruncated
+        ? `\n  ${theme.fg("muted", `(${collapseHint})`)}`
+        : "";
 
-  return `${theme.fg("toolTitle", theme.bold("summon"))} ${target}${metadata}\n  ${theme.fg("dim", preview)}`;
+  return `${theme.fg("toolTitle", theme.bold("summon"))} ${target}${metadata}\n${prompt}${hint}`;
 }
 
 /**

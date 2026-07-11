@@ -76,7 +76,16 @@ describe("buildAgentsBlock", () => {
 
 describe("formatSummonCall", () => {
   it("shows a named agent with explicit model and thinking", () => {
-    const s = formatSummonCall("Review the authentication flow", "reviewer", "claude-sonnet-4.6", "high", theme);
+    const s = formatSummonCall(
+      "Review the authentication flow",
+      "reviewer",
+      "claude-sonnet-4.6",
+      "high",
+      false,
+      "ctrl+o to expand",
+      "ctrl+o to collapse",
+      theme,
+    );
 
     expect(s).toContain("summon");
     expect(s).toContain("reviewer");
@@ -85,13 +94,56 @@ describe("formatSummonCall", () => {
     expect(s).toContain("Review the authentication flow");
   });
 
-  it("labels ephemeral imps and normalizes a long task preview", () => {
-    const task = `  Review\n  ${"x".repeat(80)}  `;
-    const s = formatSummonCall(task, undefined, undefined, undefined, plainTheme);
+  it("shows three task lines with an expansion hint when collapsed", () => {
+    const task = "Review\nFind tests\nReport issues\nInclude files";
+    const s = formatSummonCall(
+      task,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      "ctrl+o to expand",
+      "ctrl+o to collapse",
+      plainTheme,
+    );
 
-    expect(s.startsWith("summon ephemeral\n")).toBe(true);
-    expect(s).toContain("Review x");
-    expect(s).toContain("…");
+    expect(s).toContain("Review\n  Find tests\n  Report issues");
+    expect(s).toContain("1 more line");
+    expect(s).toContain("to expand");
+    expect(s).not.toContain("Include files");
+  });
+
+  it("wraps task lines at the preview width", () => {
+    const task = "x".repeat(97);
+    const s = formatSummonCall(
+      task,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      "ctrl+o to expand",
+      "ctrl+o to collapse",
+      plainTheme,
+    );
+
+    expect(s).toContain(`${"x".repeat(96)}\n  x`);
+  });
+
+  it("shows the full task when expanded", () => {
+    const task = "Review\nFind tests\nReport issues\nInclude files";
+    const s = formatSummonCall(
+      task,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      "ctrl+o to expand",
+      "ctrl+o to collapse",
+      plainTheme,
+    );
+
+    expect(s).toContain("Include files");
+    expect(s).toContain("to collapse");
   });
 });
 

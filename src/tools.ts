@@ -1,9 +1,10 @@
-import type {
-  AgentToolResult,
-  AgentToolUpdateCallback,
-  ExtensionContext,
-  Theme,
-  ToolDefinition,
+import {
+  type AgentToolResult,
+  type AgentToolUpdateCallback,
+  type ExtensionContext,
+  keyHint,
+  type Theme,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -231,7 +232,18 @@ export function summonTool(
     },
     renderCall(args, theme: Theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      text.setText(formatSummonCall(args.task, args.agent, args.model, args.thinking, theme));
+      text.setText(
+        formatSummonCall(
+          args.task,
+          args.agent,
+          args.model,
+          args.thinking,
+          context.expanded,
+          keyHint("app.tools.expand", "to expand"),
+          keyHint("app.tools.expand", "to collapse"),
+          theme,
+        ),
+      );
       return text;
     },
     renderResult(result, _options, theme: Theme, context) {
