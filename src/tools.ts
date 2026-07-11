@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { formatImpStatusDisplay, formatSummonDisplay, formatWaitDisplay } from "./display.js";
 import { spawnImpSession } from "./session.js";
 import { allImps, findImp, uncollectedImps } from "./state.js";
-import type { AgentConfig, Imp, ImpSettings, ImpSnapshot } from "./types.js";
+import type { AgentConfig, Imp, ImpSettings, ImpSnapshot, ThinkingLevel } from "./types.js";
 
 // ─── LLM result formatting (JSON) ────────────────────────────────────────────
 
@@ -44,6 +44,20 @@ function impToSnapshot(imp: Imp): ImpSnapshot {
 const SummonParams = Type.Object({
   task: Type.String({ description: "What the imp should do", minLength: 10 }),
   agent: Type.Optional(Type.String({ description: "Named agent to use, or omit for ephemeral", minLength: 1 })),
+  model: Type.Optional(Type.String({ description: "Model override for this imp", minLength: 1 })),
+  thinking: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal("off"),
+        Type.Literal("minimal"),
+        Type.Literal("low"),
+        Type.Literal("medium"),
+        Type.Literal("high"),
+        Type.Literal("xhigh"),
+      ],
+      { description: "Thinking level override for this imp" },
+    ),
+  ),
 });
 
 interface SummonDetails {
@@ -56,6 +70,7 @@ export function summonTool(
   agents: AgentConfig[],
   namePool: { allocate(): string; release(name: string): void },
   settings: ImpSettings,
+  getParentThinkingLevel: () => ThinkingLevel = () => "medium",
 ): ToolDefinition<typeof SummonParams, SummonDetails | undefined> {
   return {
     name: "summon",
@@ -67,7 +82,7 @@ export function summonTool(
     parameters: SummonParams,
     async execute(
       _toolCallId: string,
-      params: { task: string; agent?: string },
+      params: { task: string; agent?: string; model?: string; thinking?: ThinkingLevel },
       _signal: AbortSignal | undefined,
       _onUpdate: AgentToolUpdateCallback | undefined,
       ctx: ExtensionContext,
@@ -92,26 +107,41 @@ export function summonTool(
           };
         }
         agent = config.name;
-
-        // Verify the agent's model exists in the registry
-        if (config.model) {
-          const available = ctx.modelRegistry.getAvailable();
-          const resolved = available.find((m) => m.name === config?.model || m.id === config?.model);
-          if (!resolved) {
-            namePool.release(name);
-            const modelNames = available.map((m) => m.name).join(", ");
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Agent "${config.name}" requires model "${config.model}" which is not available. Models: ${modelNames || "none"}`,
-                },
-              ],
-              details: undefined,
-            };
-          }
-        }
       }
+
+      const parentModel = ctx.model;
+      if (!parentModel) {
+        namePool.release(name);
+        return {
+          content: [{ type: "text", text: "Failed to summon: no model available" }],
+          details: undefined,
+        };
+      }
+
+      const requestedModel = params.model ?? config?.model;
+      let model = parentModel;
+      if (requestedModel) {
+        const available = ctx.modelRegistry.getAvailable();
+        const resolved = available.find(
+          (candidate) => candidate.name === requestedModel || candidate.id === requestedModel,
+        );
+        if (!resolved) {
+          namePool.release(name);
+          const modelNames = available.map((candidate) => candidate.name).join(", ");
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Model "${requestedModel}" is not available. Models: ${modelNames || "none"}`,
+              },
+            ],
+            details: undefined,
+          };
+        }
+        model = resolved;
+      }
+
+      const thinkingLevel = params.thinking ?? config?.thinking ?? getParentThinkingLevel();
 
       // Create done promise for wait coordination
       let resolveDone!: () => void;
@@ -137,23 +167,13 @@ export function summonTool(
       imps.set(name, imp);
 
       // Spawn session — fire and forget
-      const parentModel = ctx.model;
-      if (!parentModel) {
-        imp.status = "failed";
-        imp.error = "No model available";
-        imp.completedAt = Date.now();
-        resolveDone();
-        return {
-          content: [{ type: "text", text: "Failed to summon: no model available" }],
-          details: undefined,
-        };
-      }
 
       spawnImpSession({
         task: params.task,
         config,
         cwd: ctx.cwd,
-        parentModel,
+        model,
+        thinkingLevel,
         modelRegistry: ctx.modelRegistry,
         signal: controller.signal,
         settings,

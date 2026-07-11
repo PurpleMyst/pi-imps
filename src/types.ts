@@ -1,3 +1,6 @@
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export type ImpStatus = "running" | "completed" | "failed" | "dismissed" | "truncated";
 
 /** Serializable subset of Imp — safe for details/display, no runtime handles. */
@@ -30,6 +33,7 @@ export interface AgentConfig {
   readonly name: string;
   readonly description: string;
   readonly model?: string;
+  readonly thinking?: ThinkingLevel;
   readonly tools?: string[];
   readonly turnLimit?: number;
   readonly systemPrompt: string;

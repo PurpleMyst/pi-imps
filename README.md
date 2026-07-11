@@ -30,7 +30,7 @@ The LLM calls `summon` to launch imps, `wait` to collect results, and the output
 
 | Tool | What it does |
 |------|-------------|
-| `summon` | Launch a background imp. Returns immediately with a name. |
+| `summon` | Launch a background imp, optionally selecting an `agent`, `model`, and `thinking` level. Returns immediately with a name. |
 | `wait` | Block until imps finish. `mode: "all"` waits for everything; `mode: "first"` returns the first to complete. Optional `names` array to target specific imps. |
 | `dismiss` | Kill running imps by name or `"all"`. |
 | `list_imps` | Check status without blocking. |
@@ -44,6 +44,7 @@ Imps can use **named agents** — markdown files with a system prompt and option
 name: reviewer
 description: Security review specialist
 model: claude-sonnet-4.6
+thinking: high
 tools: read, bash, grep
 ---
 You are a security reviewer. Focus on authentication, authorization, and input validation...
@@ -54,10 +55,11 @@ You are a security reviewer. Focus on authentication, authorization, and input v
 | `description` | yes | Shown to the LLM in the available agents list |
 | `name` | no | Override the filename-derived agent name |
 | `model` | no | Model to use. Omit to inherit the parent session's model |
+| `thinking` | no | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Omit to inherit the parent session's active level |
 | `tools` | no | Restrict which tools the agent can use. Omit to allow all tools |
 | `turns` | no | Per-agent turn limit (minimum 2). Overrides the global `turnLimit` setting |
 
-Ephemeral imps (summoned without an `agent` name) inherit the parent session's model.
+Both named and ephemeral imps accept per-summon `model` and `thinking` overrides. Resolution is: explicit `summon` value, then named-agent frontmatter, then the parent session's active value.
 
 ### Tool allowlist
 

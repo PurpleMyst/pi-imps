@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import pkg from "../package.json" with { type: "json" };
 import { loadProjectConfig } from "./settings.js";
-import type { AgentConfig, ImpSettings } from "./types.js";
+import type { AgentConfig, ImpSettings, ThinkingLevel } from "./types.js";
 
 const OWN_PACKAGE_NAME = pkg.name;
 
@@ -22,7 +22,8 @@ export interface SpawnImpSessionOptions {
   task: string;
   config: AgentConfig | undefined; // undefined = ephemeral
   cwd: string;
-  parentModel: Model<Api>;
+  model: Model<Api>;
+  thinkingLevel: ThinkingLevel;
   modelRegistry: ModelRegistry;
   signal: AbortSignal;
   settings: ImpSettings;
@@ -46,7 +47,8 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
     task,
     config,
     cwd,
-    parentModel,
+    model,
+    thinkingLevel,
     modelRegistry,
     signal,
     settings,
@@ -83,20 +85,10 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
   });
   await loader.reload();
 
-  // Resolve model: named agent's model or parent model
-  let model = parentModel;
-  if (config?.model) {
-    const available = modelRegistry.getAvailable();
-    const resolved = available.find((m) => m.name === config.model || m.id === config.model);
-    if (!resolved) {
-      throw new Error(`Model "${config.model}" not found in registry`);
-    }
-    model = resolved;
-  }
-
   const { session } = await createAgentSession({
     cwd,
     model,
+    thinkingLevel,
     tools: toolAllowlist,
     sessionManager: SessionManager.inMemory(),
     settingsManager: createImpSettingsManager(cwd),

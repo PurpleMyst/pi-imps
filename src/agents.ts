@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig, AgentSource } from "./types.js";
+import { type AgentConfig, type AgentSource, THINKING_LEVELS, type ThinkingLevel } from "./types.js";
 
 function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   if (!existsSync(dir)) return [];
@@ -38,6 +38,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       name,
       description: frontmatter.description,
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+      thinking: parseThinkingLevel(frontmatter.thinking),
       tools: parseToolsList(frontmatter.tools),
       turnLimit,
       systemPrompt: body.trim(),
@@ -81,6 +82,12 @@ export function parseTurnLimit(value: unknown): number | undefined {
   return value;
 }
 
+export function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
+  return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel)
+    ? (value as ThinkingLevel)
+    : undefined;
+}
+
 /**
  * Parse tools from frontmatter. Handles:
  * - YAML array: ["read", "bash"]
@@ -110,7 +117,10 @@ export function buildAgentsBlock(agents: AgentConfig[]): string {
   for (const a of agents) {
     lines.push("  <agent>");
     lines.push(`    <name>${a.name}</name>`);
-    lines.push(`    <description>${a.description}${a.model ? ` [model: ${a.model}]` : ""}</description>`);
+    const options = [a.model ? `model: ${a.model}` : undefined, a.thinking ? `thinking: ${a.thinking}` : undefined]
+      .filter(Boolean)
+      .join(", ");
+    lines.push(`    <description>${a.description}${options ? ` [${options}]` : ""}</description>`);
     lines.push(`    <source>${a.source}</source>`);
     lines.push("  </agent>");
   }

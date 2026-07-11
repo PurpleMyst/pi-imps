@@ -145,6 +145,69 @@ describe("summon → wait integration", () => {
   });
 });
 
+describe("model and thinking selection", () => {
+  it("applies explicit overrides to an ephemeral imp", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const parentCtx = createMockContext();
+    const alternateModel = { ...parentCtx.model, id: "alternate", name: "alternate" };
+    const ctx = createMockContext({
+      modelRegistry: { getAvailable: () => [parentCtx.model, alternateModel] } as never,
+    });
+    installMock({ totalTurns: 1 });
+
+    const summon = summonTool(imps, [], namePool, makeSettings(), () => "medium");
+    const wait = waitTool(imps);
+    await summon.execute(
+      "tc1",
+      { task: "analyze the codebase thoroughly", model: "alternate", thinking: "high" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    await wait.execute("tc2", { mode: "all" }, undefined, undefined, ctx);
+
+    expect(vi.mocked(createAgentSession)).toHaveBeenCalledWith(
+      expect.objectContaining({ model: alternateModel, thinkingLevel: "high" }),
+    );
+  });
+
+  it("uses named-agent defaults and lets summon override them", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const parentCtx = createMockContext();
+    const agentModel = { ...parentCtx.model, id: "agent-model", name: "agent-model" };
+    const ctx = createMockContext({
+      modelRegistry: { getAvailable: () => [parentCtx.model, agentModel] } as never,
+    });
+    installMock({ totalTurns: 1 });
+    const agent: AgentConfig = {
+      name: "reviewer",
+      description: "Reviews code",
+      model: "agent-model",
+      thinking: "low",
+      systemPrompt: "Review carefully.",
+      source: "user",
+      filePath: "/tmp/reviewer.md",
+    };
+
+    const summon = summonTool(imps, [agent], namePool, makeSettings(), () => "medium");
+    const wait = waitTool(imps);
+    await summon.execute(
+      "tc1",
+      { task: "analyze the codebase thoroughly", agent: "reviewer", thinking: "high" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    await wait.execute("tc2", { mode: "all" }, undefined, undefined, ctx);
+
+    expect(vi.mocked(createAgentSession)).toHaveBeenCalledWith(
+      expect.objectContaining({ model: agentModel, thinkingLevel: "high" }),
+    );
+  });
+});
+
 describe("wait mode=first", () => {
   it("returns first finisher; others remain running", async () => {
     const imps = new Map();
@@ -225,6 +288,27 @@ describe("summon error paths", () => {
     const item = result.content[0];
     expect(item.type).toBe("text");
     if (item.type === "text") expect(item.text).toContain("Unknown agent");
+    expect(vi.mocked(createAgentSession)).not.toHaveBeenCalled();
+    expect(namePool.released).toContain("imp-1");
+  });
+
+  it("unavailable explicit model → error result, no spawn, name released", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const ctx = createMockContext();
+    const summon = summonTool(imps, [], namePool, makeSettings());
+
+    const result = await summon.execute(
+      "tc1",
+      { task: "analyze the codebase thoroughly", model: "missing" },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const item = result.content[0];
+    expect(item.type).toBe("text");
+    if (item.type === "text") expect(item.text).toContain('Model "missing" is not available');
     expect(vi.mocked(createAgentSession)).not.toHaveBeenCalled();
     expect(namePool.released).toContain("imp-1");
   });

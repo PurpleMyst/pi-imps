@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildAgentsBlock, discoverAgents, parseToolsList, parseTurnLimit } from "../src/agents.js";
+import { buildAgentsBlock, discoverAgents, parseThinkingLevel, parseToolsList, parseTurnLimit } from "../src/agents.js";
 import type { AgentConfig } from "../src/types.js";
 
 // Mock getAgentDir so tests never touch the real ~/.pi/agent/agents/ directory.
@@ -76,6 +76,20 @@ describe("parseToolsList", () => {
   });
 });
 
+describe("parseThinkingLevel", () => {
+  it("accepts supported levels", () => {
+    expect(parseThinkingLevel("off")).toBe("off");
+    expect(parseThinkingLevel("high")).toBe("high");
+    expect(parseThinkingLevel("xhigh")).toBe("xhigh");
+  });
+
+  it("rejects unsupported values", () => {
+    expect(parseThinkingLevel("max")).toBeUndefined();
+    expect(parseThinkingLevel("verbose")).toBeUndefined();
+    expect(parseThinkingLevel(1)).toBeUndefined();
+  });
+});
+
 describe("parseTurnLimit", () => {
   it("accepts integer >= 2", () => {
     expect(parseTurnLimit(2)).toBe(2);
@@ -142,6 +156,20 @@ describe("buildAgentsBlock", () => {
     ];
     const block = buildAgentsBlock(agents);
     expect(block).toContain("<description>A coding agent [model: claude-3-5-sonnet]</description>");
+  });
+
+  it("appends thinking to description when present", () => {
+    const agents: AgentConfig[] = [
+      {
+        name: "mason",
+        description: "A coding agent",
+        thinking: "high",
+        source: "user",
+        systemPrompt: "",
+        filePath: "/fake/mason.md",
+      },
+    ];
+    expect(buildAgentsBlock(agents)).toContain("<description>A coding agent [thinking: high]</description>");
   });
 
   it("omits model annotation when model is absent", () => {

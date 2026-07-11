@@ -26,6 +26,9 @@ Summon an imp. Returns immediately with a generated name. Non-blocking — the i
 summon({
   task: string,           // what the imp should do
   agent?: string,         // named agent, or ephemeral
+  model?: string,         // override the agent or parent model
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
+                           // override the agent or parent thinking level
 }) → { name: string }
 ```
 
@@ -87,7 +90,13 @@ Running imp count in the status line. Minimal — just the count.
 
 ### Imp Sessions
 
-Ephemeral, in-memory, no persistence. Ephemeral imps inherit the parent's model; named agents use their frontmatter model.
+Ephemeral, in-memory, no persistence. Model and thinking level resolve independently at summon time:
+
+1. Explicit `summon` override
+2. Named agent frontmatter (`model` / `thinking`)
+3. Parent session's active model / thinking level
+
+This gives named agents reusable defaults while allowing both named and ephemeral imps to be configured per invocation. Requested models must be available in the parent's model registry. Thinking accepts pi's levels: `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 ### Tools
 
