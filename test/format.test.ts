@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildAgentsBlock } from "../src/agents.js";
-import { formatSummonDisplay, formatWaitDisplay } from "../src/display.js";
+import { formatSummonCall, formatSummonDisplay, formatWaitDisplay } from "../src/display.js";
 import type { AgentConfig, Imp } from "../src/types.js";
 
 function makeImp(overrides: Partial<Imp> & { name: string }): Imp {
@@ -34,9 +34,15 @@ function makeAgent(overrides: Partial<AgentConfig> & { name: string }): AgentCon
 
 // Minimal theme stub that wraps text in markers for assertion
 const theme = {
+  bold: (text: string) => `**${text}**`,
   fg: (_color: string, text: string) => `[${_color}:${text}]`,
   // biome-ignore lint/suspicious/noExplicitAny: minimal theme stub for tests
 } as any;
+
+const plainTheme = {
+  bold: (text: string) => text,
+  fg: (_color: string, text: string) => text,
+} as typeof theme;
 
 // --- buildAgentsBlock ---
 
@@ -63,6 +69,29 @@ describe("buildAgentsBlock", () => {
   it("includes model in description when present", () => {
     const result = buildAgentsBlock([makeAgent({ name: "fast", description: "Quick agent", model: "gpt-5" })]);
     expect(result).toContain("[model: gpt-5]");
+  });
+});
+
+// --- formatSummonCall ---
+
+describe("formatSummonCall", () => {
+  it("shows a named agent with explicit model and thinking", () => {
+    const s = formatSummonCall("Review the authentication flow", "reviewer", "claude-sonnet-4.6", "high", theme);
+
+    expect(s).toContain("summon");
+    expect(s).toContain("reviewer");
+    expect(s).toContain("claude-sonnet-4.6");
+    expect(s).toContain("high");
+    expect(s).toContain("Review the authentication flow");
+  });
+
+  it("labels ephemeral imps and normalizes a long task preview", () => {
+    const task = `  Review\n  ${"x".repeat(80)}  `;
+    const s = formatSummonCall(task, undefined, undefined, undefined, plainTheme);
+
+    expect(s.startsWith("summon ephemeral\n")).toBe(true);
+    expect(s).toContain("Review x");
+    expect(s).toContain("…");
   });
 });
 

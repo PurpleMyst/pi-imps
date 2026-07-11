@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatImpStatusDisplay, formatSummonDisplay, formatWaitDisplay } from "./display.js";
+import { formatImpStatusDisplay, formatSummonCall, formatSummonDisplay, formatWaitDisplay } from "./display.js";
 import { spawnImpSession } from "./session.js";
 import { allImps, findImp, uncollectedImps } from "./state.js";
 import type { AgentConfig, Imp, ImpSettings, ImpSnapshot, ThinkingLevel } from "./types.js";
@@ -228,6 +228,11 @@ export function summonTool(
         ],
         details: { name, agent },
       };
+    },
+    renderCall(args, theme: Theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      text.setText(formatSummonCall(args.task, args.agent, args.model, args.thinking, theme));
+      return text;
     },
     renderResult(result, _options, theme: Theme, context) {
       const details = result.details as SummonDetails | undefined;
