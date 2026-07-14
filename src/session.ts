@@ -103,6 +103,7 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
   let turnCount = 0;
   let lastOutput = "";
   let totalUsage = { input: 0, output: 0 };
+  let finalError: string | undefined;
   let truncated = false;
 
   const turnLimit = resolveTurnLimit(config?.turnLimit, settings.turnLimit);
@@ -160,6 +161,7 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
       if (msg.content) {
         extractAssistantText(msg.content);
       }
+      finalError = msg.stopReason === "error" ? (msg.errorMessage ?? "Provider request failed") : undefined;
     }
   });
 
@@ -167,7 +169,11 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
   session
     .prompt(task)
     .then(() => {
-      onComplete({ output: lastOutput, truncated });
+      if (truncated) {
+        onComplete({ output: lastOutput, truncated: true });
+      } else {
+        onComplete({ output: lastOutput, error: finalError });
+      }
     })
     .catch((err) => {
       // Abort due to truncation is not an error

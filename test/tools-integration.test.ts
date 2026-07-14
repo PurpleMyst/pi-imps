@@ -104,6 +104,28 @@ describe("summon → wait integration", () => {
     expect(json[0].error).toBe("session crashed");
   });
 
+  it("resolved provider error yields status=failed", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const ctx = createMockContext();
+    installMock({
+      totalTurns: 1,
+      finalText: "",
+      finalStopReason: "error",
+      finalErrorMessage: "The requested model is not supported.",
+    });
+
+    const summon = summonTool(imps, [] as AgentConfig[], namePool, makeSettings());
+    const wait = waitTool(imps);
+
+    await summon.execute("tc1", { task: "analyze the codebase thoroughly" }, undefined, undefined, ctx);
+    const result = await wait.execute("tc2", { mode: "all" }, undefined, undefined, ctx);
+    const json = parseResult(result);
+
+    expect(json[0].status).toBe("failed");
+    expect(json[0].error).toBe("The requested model is not supported.");
+  });
+
   it("turn limit triggers steer with FINAL TURN directive and truncates", async () => {
     const imps = new Map();
     const namePool = makeNamePool();

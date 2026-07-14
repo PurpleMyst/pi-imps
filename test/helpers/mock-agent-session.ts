@@ -5,6 +5,8 @@ import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-
 export interface MockSessionConfig {
   totalTurns?: number;
   finalText?: string; // default "ok"
+  finalStopReason?: "stop" | "error"; // default "stop"
+  finalErrorMessage?: string;
   perTurnUsage?: { input: number; output: number }; // default { input: 10, output: 5 }
   toolCalls?: Array<{ toolName: string; args: Record<string, unknown> } | undefined>;
   failOnPrompt?: string;
@@ -43,16 +45,21 @@ export function createMockSession(config: MockSessionConfig = {}): {
 } {
   const listeners: Array<(event: AgentSessionEvent) => void> = [];
 
-  // Stub AssistantMessage builder. src/session.ts only reads role, usage.{input,output},
-  // and content[].{type,text}; the remaining fields exist solely to satisfy the SDK type
-  // so a future shape change in @earendil-works/pi-ai/pi-coding-agent fails this build.
-  const makeAssistantMessage = (text: string, usage: { input: number; output: number }) => ({
+  // Stub AssistantMessage builder. Keep the full shape type-checked so SDK
+  // message changes fail the build.
+  const makeAssistantMessage = (
+    text: string,
+    usage: { input: number; output: number },
+    stopReason: "stop" | "error" = "stop",
+    errorMessage?: string,
+  ) => ({
     role: "assistant" as const,
     content: [{ type: "text" as const, text }],
     api: "mock",
     provider: "mock",
     model: "mock",
-    stopReason: "stop" as const,
+    stopReason,
+    errorMessage,
     timestamp: 0,
     usage: {
       input: usage.input,
@@ -180,10 +187,15 @@ export function createMockSession(config: MockSessionConfig = {}): {
           }
         }
 
-        // Emit message_end on successful completion
+        // Provider failures still resolve prompt(), but finalize with stopReason "error".
         const endEvt = {
           type: "message_end" as const,
-          message: makeAssistantMessage(finalText, { input: 0, output: 0 }),
+          message: makeAssistantMessage(
+            finalText,
+            { input: 0, output: 0 },
+            config.finalStopReason,
+            config.finalErrorMessage,
+          ),
         } satisfies AgentSessionEvent;
         for (const l of listeners) l(endEvt);
 
