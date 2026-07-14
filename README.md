@@ -55,7 +55,7 @@ You are a security reviewer. Focus on authentication, authorization, and input v
 | `description` | yes | Shown to the LLM in the available agents list |
 | `name` | no | Override the filename-derived agent name |
 | `model` | no | Model to use. Omit to inherit the parent session's model |
-| `thinking` | no | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Omit to inherit the parent session's active level |
+| `thinking` | no | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Omit to inherit the parent session's active level |
 | `tools` | no | Restrict which tools the agent can use. Omit to allow all tools |
 | `turns` | no | Per-agent turn limit (minimum 2). Overrides the global `turnLimit` setting |
 

@@ -81,10 +81,10 @@ describe("parseThinkingLevel", () => {
     expect(parseThinkingLevel("off")).toBe("off");
     expect(parseThinkingLevel("high")).toBe("high");
     expect(parseThinkingLevel("xhigh")).toBe("xhigh");
+    expect(parseThinkingLevel("max")).toBe("max");
   });
 
   it("rejects unsupported values", () => {
-    expect(parseThinkingLevel("max")).toBeUndefined();
     expect(parseThinkingLevel("verbose")).toBeUndefined();
     expect(parseThinkingLevel(1)).toBeUndefined();
   });

@@ -27,7 +27,7 @@ summon({
   task: string,           // what the imp should do
   agent?: string,         // named agent, or ephemeral
   model?: string,         // override the agent or parent model
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
                            // override the agent or parent thinking level
 }) → { name: string }
 ```
@@ -96,7 +96,7 @@ Ephemeral, in-memory, no persistence. Model and thinking level resolve independe
 2. Named agent frontmatter (`model` / `thinking`)
 3. Parent session's active model / thinking level
 
-This gives named agents reusable defaults while allowing both named and ephemeral imps to be configured per invocation. Requested models must be available in the parent's model registry. Thinking accepts pi's levels: `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+This gives named agents reusable defaults while allowing both named and ephemeral imps to be configured per invocation. Requested models must be available in the parent's model registry. Thinking accepts pi's levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 ### Tools
 

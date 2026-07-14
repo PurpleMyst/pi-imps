@@ -55,6 +55,7 @@ const SummonParams = Type.Object({
         Type.Literal("medium"),
         Type.Literal("high"),
         Type.Literal("xhigh"),
+        Type.Literal("max"),
       ],
       { description: "Thinking level override for this imp" },
     ),

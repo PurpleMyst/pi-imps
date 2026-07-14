@@ -53,12 +53,7 @@ export default function (pi: ExtensionAPI): void {
 
   // ── Tools ──────────────────────────────────────────────────────────────
 
-  pi.registerTool(
-    summonTool(imps, agents, namePool, loadImpSettings(), () => {
-      const level = pi.getThinkingLevel();
-      return level === "max" ? "xhigh" : level;
-    }),
-  );
+  pi.registerTool(summonTool(imps, agents, namePool, loadImpSettings(), () => pi.getThinkingLevel()));
   pi.registerTool(waitTool(imps));
   pi.registerTool(dismissTool(imps, namePool));
   pi.registerTool(listImpsTool(imps));

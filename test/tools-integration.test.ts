@@ -194,6 +194,20 @@ describe("model and thinking selection", () => {
     );
   });
 
+  it("inherits the max thinking level from the parent", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const ctx = createMockContext();
+    installMock({ totalTurns: 1 });
+
+    const summon = summonTool(imps, [], namePool, makeSettings(), () => "max");
+    const wait = waitTool(imps);
+    await summon.execute("tc1", { task: "analyze the codebase thoroughly" }, undefined, undefined, ctx);
+    await wait.execute("tc2", { mode: "all" }, undefined, undefined, ctx);
+
+    expect(vi.mocked(createAgentSession)).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "max" }));
+  });
+
   it("uses named-agent defaults and lets summon override them", async () => {
     const imps = new Map();
     const namePool = makeNamePool();
