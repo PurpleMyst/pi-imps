@@ -6,6 +6,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -85,6 +86,12 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
   });
   await loader.reload();
 
+  const modelRuntime = await ModelRuntime.create();
+  for (const providerId of modelRegistry.getRegisteredProviderIds()) {
+    const providerConfig = modelRegistry.getRegisteredProviderConfig(providerId);
+    if (providerConfig) modelRuntime.registerProvider(providerId, providerConfig);
+  }
+
   const { session } = await createAgentSession({
     cwd,
     model,
@@ -92,7 +99,7 @@ export async function spawnImpSession(opts: SpawnImpSessionOptions): Promise<Age
     tools: toolAllowlist,
     sessionManager: SessionManager.inMemory(),
     settingsManager: createImpSettingsManager(cwd),
-    modelRegistry,
+    modelRuntime,
     resourceLoader: loader,
   });
 

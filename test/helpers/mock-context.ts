@@ -9,6 +9,8 @@ export function createMockContext(overrides?: Partial<ExtensionContext>): Extens
     model: mockModel,
     modelRegistry: {
       getAvailable: () => [mockModel],
+      getRegisteredProviderIds: () => [],
+      getRegisteredProviderConfig: () => undefined,
     } as unknown as ModelRegistry,
     ...overrides,
   } as ExtensionContext;

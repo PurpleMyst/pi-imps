@@ -9,6 +9,7 @@ import { createMockContext, createMockSession, type MockSessionConfig } from "./
 // ─── Module-level mock ref ────────────────────────────────────────────────────
 
 const sessionRef: { current: ReturnType<typeof createMockSession> | null } = { current: null };
+const modelRuntime = { registerProvider: vi.fn() };
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   const real = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
@@ -16,6 +17,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
     ...real,
     // biome-ignore lint/style/noNonNullAssertion: set by installMock before spawn reaches createAgentSession
     createAgentSession: vi.fn(async () => ({ session: sessionRef.current!.session })),
+    ModelRuntime: { create: vi.fn(async () => modelRuntime) },
     // Stub resource loader to avoid real I/O in integration tests
     DefaultResourceLoader: class {
       async reload() {}
@@ -25,7 +27,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 
 // Import AFTER vi.mock so src/session.ts picks up the mocked createAgentSession
 const { summonTool, waitTool, dismissTool } = await import("../src/tools.js");
-const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
+const { createAgentSession, ModelRuntime } = await import("@earendil-works/pi-coding-agent");
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -174,7 +176,10 @@ describe("model and thinking selection", () => {
     const parentCtx = createMockContext();
     const alternateModel = { ...parentCtx.model, id: "alternate", name: "alternate" };
     const ctx = createMockContext({
-      modelRegistry: { getAvailable: () => [parentCtx.model, alternateModel] } as never,
+      modelRegistry: {
+        ...parentCtx.modelRegistry,
+        getAvailable: () => [parentCtx.model, alternateModel],
+      } as never,
     });
     installMock({ totalTurns: 1 });
 
@@ -192,6 +197,32 @@ describe("model and thinking selection", () => {
     expect(vi.mocked(createAgentSession)).toHaveBeenCalledWith(
       expect.objectContaining({ model: alternateModel, thinkingLevel: "high" }),
     );
+  });
+
+  it("passes a model runtime with registered parent providers to the child session", async () => {
+    const imps = new Map();
+    const namePool = makeNamePool();
+    const providerConfig = { baseUrl: "https://example.test", apiKey: "test", models: [] };
+    const parentCtx = createMockContext();
+    const ctx = createMockContext({
+      modelRegistry: {
+        ...parentCtx.modelRegistry,
+        getRegisteredProviderIds: () => ["custom"],
+        getRegisteredProviderConfig: () => providerConfig,
+      } as never,
+    });
+    installMock({ totalTurns: 1 });
+
+    const summon = summonTool(imps, [], namePool, makeSettings());
+    const wait = waitTool(imps);
+    await summon.execute("tc1", { task: "use the custom provider" }, undefined, undefined, ctx);
+    await wait.execute("tc2", { mode: "all" }, undefined, undefined, ctx);
+
+    expect(vi.mocked(ModelRuntime.create)).toHaveBeenCalled();
+    expect(modelRuntime.registerProvider).toHaveBeenCalledWith("custom", providerConfig);
+    const options = vi.mocked(createAgentSession).mock.calls[0]?.[0];
+    expect(options).toEqual(expect.objectContaining({ modelRuntime }));
+    expect(options).not.toHaveProperty("modelRegistry");
   });
 
   it("inherits the max thinking level from the parent", async () => {
@@ -214,7 +245,10 @@ describe("model and thinking selection", () => {
     const parentCtx = createMockContext();
     const agentModel = { ...parentCtx.model, id: "agent-model", name: "agent-model" };
     const ctx = createMockContext({
-      modelRegistry: { getAvailable: () => [parentCtx.model, agentModel] } as never,
+      modelRegistry: {
+        ...parentCtx.modelRegistry,
+        getAvailable: () => [parentCtx.model, agentModel],
+      } as never,
     });
     installMock({ totalTurns: 1 });
     const agent: AgentConfig = {
