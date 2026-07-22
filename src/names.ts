@@ -34,7 +34,7 @@ export function createNamePool() {
           return name;
         }
       }
-      return `imp-${++counter}`;
+      return `goblin-${++counter}`;
     },
     release(name: string) {
       used.delete(name);

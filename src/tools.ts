@@ -1,22 +1,22 @@
 import { type AgentToolResult, keyHint, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatImpStatusDisplay, formatSummonCall, formatWaitDisplay } from "./display.js";
-import type { ImpRuntime } from "./runtime.js";
-import type { Imp, ImpSnapshot, ThinkingLevel } from "./types.js";
+import { formatGoblinStatusDisplay, formatSummonCall, formatWaitDisplay } from "./display.js";
+import type { GoblinRuntime } from "./runtime.js";
+import type { Goblin, GoblinSnapshot, ThinkingLevel } from "./types.js";
 
-function impJson(imp: ImpSnapshot): Record<string, unknown> {
+function goblinJson(goblin: GoblinSnapshot): Record<string, unknown> {
   return {
-    name: imp.name,
-    status: imp.status,
-    ...(imp.error !== undefined ? { error: imp.error } : {}),
-    ...(imp.output !== undefined ? { output: imp.output } : {}),
+    name: goblin.name,
+    status: goblin.status,
+    ...(goblin.error !== undefined ? { error: goblin.error } : {}),
+    ...(goblin.output !== undefined ? { output: goblin.output } : {}),
   };
 }
 
 const SummonParams = Type.Object({
-  task: Type.String({ description: "What the imp should do", minLength: 10 }),
-  model: Type.Optional(Type.String({ description: "Model override for this imp", minLength: 1 })),
+  task: Type.String({ description: "What the goblin should do", minLength: 10 }),
+  model: Type.Optional(Type.String({ description: "Model override for this goblin", minLength: 1 })),
   thinking: Type.Optional(
     Type.Union([
       Type.Literal("off"),
@@ -31,16 +31,16 @@ const SummonParams = Type.Object({
 });
 
 export function summonTool(
-  runtime: ImpRuntime,
+  runtime: GoblinRuntime,
   getThinking: () => ThinkingLevel,
 ): ToolDefinition<typeof SummonParams, { name: string } | undefined> {
   return {
     name: "summon",
-    label: "Summon Imp",
+    label: "Summon Goblin",
     description:
-      "Summon an imp in a Herdr-owned Pi workspace. Returns immediately after deterministic checks with a name; use wait to collect the result.",
-    promptSnippet: "Summon an imp for background task delegation",
-    promptGuidelines: ["You can summon multiple imps in parallel, then use wait with mode all or first."],
+      "Summon a goblin in a Herdr-owned Pi workspace. Returns immediately after deterministic checks with a name; use wait to collect the result.",
+    promptSnippet: "Summon a goblin for background task delegation",
+    promptGuidelines: ["You can summon multiple goblins in parallel, then use wait with mode all or first."],
     parameters: SummonParams,
     async execute(_id, params, _signal, _update, ctx) {
       try {
@@ -52,10 +52,10 @@ export function summonTool(
           parentModel: ctx.model,
           modelRegistry: ctx.modelRegistry,
         });
-        const imp = runtime.summon(prepared, ctx.cwd);
+        const goblin = runtime.summon(prepared, ctx.cwd);
         return {
-          content: [{ type: "text", text: JSON.stringify({ name: imp.name }) }],
-          details: { name: imp.name },
+          content: [{ type: "text", text: JSON.stringify({ name: goblin.name }) }],
+          details: { name: goblin.name },
         };
       } catch (error) {
         return {
@@ -108,47 +108,49 @@ function aborted(signal: AbortSignal | undefined): Promise<"aborted"> | undefine
   });
 }
 
-function eligible(runtime: ImpRuntime, names: Set<string> | undefined): Imp[] {
-  return [...runtime.imps.values()].filter((imp) => !names || names.has(imp.name));
+function eligible(runtime: GoblinRuntime, names: Set<string> | undefined): Goblin[] {
+  return [...runtime.goblins.values()].filter((goblin) => !names || names.has(goblin.name));
 }
 
 export function waitTool(
-  runtime: ImpRuntime,
-): ToolDefinition<typeof WaitParams, { imps: ImpSnapshot[] }, { animationFrame: number }> {
+  runtime: GoblinRuntime,
+): ToolDefinition<typeof WaitParams, { goblins: GoblinSnapshot[] }, { animationFrame: number }> {
   return {
     name: "wait",
-    label: "Wait for Imps",
+    label: "Wait for Goblins",
     description:
-      "Block until imps complete. all waits for every eligible imp; first returns one claimed result without cancelling the others.",
-    promptGuidelines: ["Collected imps are removed. After wait(first), call wait again or dismiss remaining imps."],
+      "Block until goblins complete. all waits for every eligible goblin; first returns one claimed result without cancelling the others.",
+    promptGuidelines: [
+      "Collected goblins are removed. After wait(first), call wait again or dismiss remaining goblins.",
+    ],
     parameters: WaitParams,
-    async execute(_id, params, signal, onUpdate): Promise<AgentToolResult<{ imps: ImpSnapshot[] }>> {
+    async execute(_id, params, signal, onUpdate): Promise<AgentToolResult<{ goblins: GoblinSnapshot[] }>> {
       const names = params.names ? new Set(params.names) : undefined;
       let waiting = eligible(runtime, names);
       if (waiting.length === 0) {
-        return { content: [{ type: "text", text: "No uncollected imps to wait for." }], details: { imps: [] } };
+        return { content: [{ type: "text", text: "No uncollected goblins to wait for." }], details: { goblins: [] } };
       }
       const abortPromise = aborted(signal);
       const emit = () => {
         waiting = eligible(runtime, names);
         void runtime.refreshAll(waiting);
         onUpdate?.({
-          content: [{ type: "text", text: JSON.stringify(waiting.map((imp) => impJson(imp))) }],
-          details: { imps: runtime.snapshots().filter((snapshot) => !names || names.has(snapshot.name)) },
+          content: [{ type: "text", text: JSON.stringify(waiting.map((goblin) => goblinJson(goblin))) }],
+          details: { goblins: runtime.snapshots().filter((snapshot) => !names || names.has(snapshot.name)) },
         });
       };
       emit();
       const interval = setInterval(emit, 200);
       try {
-        const claimed: ImpSnapshot[] = [];
+        const claimed: GoblinSnapshot[] = [];
         if (params.mode === "all") {
           const outcome = await Promise.race([
-            Promise.all(waiting.map((imp) => imp.done)).then(() => "done" as const),
+            Promise.all(waiting.map((goblin) => goblin.done)).then(() => "done" as const),
             ...(abortPromise ? [abortPromise] : []),
           ]);
           if (outcome === "aborted" || signal?.aborted) return thisResult([]);
-          for (const imp of waiting) {
-            const snapshot = runtime.claim(imp);
+          for (const goblin of waiting) {
+            const snapshot = runtime.claim(goblin);
             if (snapshot && snapshot.status !== "dismissed") claimed.push(snapshot);
           }
         } else {
@@ -156,11 +158,11 @@ export function waitTool(
             waiting = eligible(runtime, names);
             if (waiting.length === 0) break;
             const outcome = await Promise.race([
-              ...waiting.map((imp) => imp.done.then(() => imp)),
+              ...waiting.map((goblin) => goblin.done.then(() => goblin)),
               ...(abortPromise ? [abortPromise] : []),
             ]);
             if (outcome === "aborted" || signal?.aborted) return thisResult([]);
-            const snapshot = runtime.claim(outcome as Imp);
+            const snapshot = runtime.claim(outcome as Goblin);
             if (snapshot && snapshot.status !== "dismissed") {
               claimed.push(snapshot);
               break;
@@ -183,30 +185,35 @@ export function waitTool(
       context.state.animationFrame = (context.state.animationFrame ?? 0) + 1;
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       text.setText(
-        formatWaitDisplay(result.details?.imps ?? [], context.args?.mode ?? "all", theme, context.state.animationFrame),
+        formatWaitDisplay(
+          result.details?.goblins ?? [],
+          context.args?.mode ?? "all",
+          theme,
+          context.state.animationFrame,
+        ),
       );
       return text;
     },
   };
 }
 
-function thisResult(imps: ImpSnapshot[]): AgentToolResult<{ imps: ImpSnapshot[] }> {
-  return { content: [{ type: "text", text: JSON.stringify(imps.map(impJson)) }], details: { imps } };
+function thisResult(goblins: GoblinSnapshot[]): AgentToolResult<{ goblins: GoblinSnapshot[] }> {
+  return { content: [{ type: "text", text: JSON.stringify(goblins.map(goblinJson)) }], details: { goblins } };
 }
 
 const DismissParams = Type.Object({ name: Type.String({ minLength: 1 }) });
 
 export function dismissTool(
-  runtime: ImpRuntime,
+  runtime: GoblinRuntime,
 ): ToolDefinition<typeof DismissParams, { names: string[] } | undefined> {
   return {
     name: "dismiss",
-    label: "Dismiss Imp",
-    description: 'Dismiss a running or terminal uncollected imp. Pass an imp name or "all".',
+    label: "Dismiss Goblin",
+    description: 'Dismiss a running or terminal uncollected goblin. Pass a goblin name or "all".',
     parameters: DismissParams,
     async execute(_id, params) {
-      if (params.name !== "all" && !runtime.imps.has(params.name)) {
-        return { content: [{ type: "text", text: `No imp found: ${params.name}` }], details: undefined };
+      if (params.name !== "all" && !runtime.goblins.has(params.name)) {
+        return { content: [{ type: "text", text: `No goblin found: ${params.name}` }], details: undefined };
       }
       const names = runtime.dismiss(params.name);
       return {
@@ -228,24 +235,25 @@ export function dismissTool(
 
 const ListParams = Type.Object({});
 
-export function listImpsTool(runtime: ImpRuntime): ToolDefinition<typeof ListParams, ImpSnapshot[]> {
+export function listGoblinsTool(runtime: GoblinRuntime): ToolDefinition<typeof ListParams, GoblinSnapshot[]> {
   return {
-    name: "list_imps",
-    label: "List Imps",
-    description: "List running and recently completed imps with current on-demand Herdr state and bridge statistics.",
-    promptGuidelines: ["list_imps shows status only; use wait to collect full results."],
+    name: "list_goblins",
+    label: "List Goblins",
+    description:
+      "List running and recently completed goblins with current on-demand Herdr state and bridge statistics.",
+    promptGuidelines: ["list_goblins shows status only; use wait to collect full results."],
     parameters: ListParams,
     async execute() {
       await runtime.refreshAll();
       const snapshots = runtime.snapshots();
-      return { content: [{ type: "text", text: JSON.stringify(snapshots.map(impJson)) }], details: snapshots };
+      return { content: [{ type: "text", text: JSON.stringify(snapshots.map(goblinJson)) }], details: snapshots };
     },
     renderResult(result, _options, theme: Theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       text.setText(
         result.details?.length
-          ? result.details.map((imp, index) => formatImpStatusDisplay(imp, theme, index)).join("\n")
-          : theme.fg("dim", "No imps."),
+          ? result.details.map((goblin, index) => formatGoblinStatusDisplay(goblin, theme, index)).join("\n")
+          : theme.fg("dim", "No goblins."),
       );
       return text;
     },

@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ImpSettings } from "./types.js";
+import type { GoblinSettings } from "./types.js";
 
-const DEFAULTS: ImpSettings = {
+const DEFAULTS: GoblinSettings = {
   turnLimit: 30,
   toolAllowlist: undefined,
   modelPatterns: undefined,
@@ -23,7 +23,7 @@ function policyArray(name: string, value: unknown, allowEmptyStrings: boolean): 
   return strings;
 }
 
-export function parseImpSettings(block: Record<string, unknown> | undefined): ImpSettings {
+export function parseGoblinSettings(block: Record<string, unknown> | undefined): GoblinSettings {
   if (!block || typeof block !== "object") return { ...DEFAULTS };
   return {
     turnLimit:
@@ -39,10 +39,10 @@ export function parseImpSettings(block: Record<string, unknown> | undefined): Im
   };
 }
 
-export function loadImpSettings(agentDir = getAgentDir()): ImpSettings {
+export function loadGoblinSettings(agentDir = getAgentDir()): GoblinSettings {
   try {
-    const raw = JSON.parse(readFileSync(join(agentDir, "imps.json"), "utf8"));
-    return parseImpSettings(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : undefined);
+    const raw = JSON.parse(readFileSync(join(agentDir, "goblins.json"), "utf8"));
+    return parseGoblinSettings(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : undefined);
   } catch (error) {
     if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
       return { ...DEFAULTS };

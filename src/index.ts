@@ -1,20 +1,20 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ImpRuntime } from "./runtime.js";
-import { loadImpSettings } from "./settings.js";
-import { dismissTool, listImpsTool, summonTool, waitTool } from "./tools.js";
+import { GoblinRuntime } from "./runtime.js";
+import { loadGoblinSettings } from "./settings.js";
+import { dismissTool, listGoblinsTool, summonTool, waitTool } from "./tools.js";
 
-export default function piImps(pi: ExtensionAPI): void {
-  if (process.env.PI_IMPS_CHILD === "1") return;
+export default function piGoblins(pi: ExtensionAPI): void {
+  if (process.env.PI_GOBLINS_CHILD === "1") return;
 
-  const runtime = new ImpRuntime({
-    settings: loadImpSettings(),
+  const runtime = new GoblinRuntime({
+    settings: loadGoblinSettings(),
     bridgePath: fileURLToPath(new URL("./child-bridge.ts", import.meta.url)),
   });
 
   const updateStatus = (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) => {
-    const running = [...runtime.imps.values()].filter((imp) => imp.status === "running").length;
-    ctx.ui.setStatus("imps", running ? `${running} imp${running === 1 ? "" : "s"}` : undefined);
+    const running = [...runtime.goblins.values()].filter((goblin) => goblin.status === "running").length;
+    ctx.ui.setStatus("goblins", running ? `${running} goblin${running === 1 ? "" : "s"}` : undefined);
   };
 
   pi.on("session_start", (_event, ctx) => updateStatus(ctx));
@@ -26,5 +26,5 @@ export default function piImps(pi: ExtensionAPI): void {
   pi.registerTool(summonTool(runtime, () => pi.getThinkingLevel()));
   pi.registerTool(waitTool(runtime));
   pi.registerTool(dismissTool(runtime));
-  pi.registerTool(listImpsTool(runtime));
+  pi.registerTool(listGoblinsTool(runtime));
 }

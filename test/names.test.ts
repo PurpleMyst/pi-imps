@@ -22,7 +22,7 @@ describe("createNamePool", () => {
   it("does not return fallback names under normal usage", () => {
     const pool = createNamePool();
     for (let i = 0; i < 50; i++) {
-      expect(pool.allocate()).not.toMatch(/^imp-\d+$/);
+      expect(pool.allocate()).not.toMatch(/^goblin-\d+$/);
     }
   });
 
@@ -44,6 +44,6 @@ describe("createNamePool", () => {
     const name = pool.allocate();
     pool.release(name);
     pool.release(name); // should not throw
-    expect(pool.allocate()).not.toMatch(/^imp-\d+$/);
+    expect(pool.allocate()).not.toMatch(/^goblin-\d+$/);
   });
 });

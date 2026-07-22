@@ -3,7 +3,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = ModelThinkingLevel;
 export type ResultStatus = "completed" | "failed" | "truncated";
-export type ImpStatus = "running" | ResultStatus | "dismissed";
+export type GoblinStatus = "running" | ResultStatus | "dismissed";
 export type HerdrStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
 export interface TerminalResult {
@@ -12,9 +12,9 @@ export interface TerminalResult {
   readonly error?: string;
 }
 
-export interface ImpSnapshot {
+export interface GoblinSnapshot {
   readonly name: string;
-  readonly status: ImpStatus;
+  readonly status: GoblinStatus;
   readonly turns: number;
   readonly tokens: { readonly input: number; readonly output: number };
   readonly output?: string;
@@ -30,7 +30,7 @@ export interface OwnedWorkspace {
   readonly agentName: string;
 }
 
-export interface Imp extends ImpSnapshot {
+export interface Goblin extends GoblinSnapshot {
   readonly task: string;
   readonly launchId: string;
   readonly ownerId: string;
@@ -41,7 +41,7 @@ export interface Imp extends ImpSnapshot {
   readonly done: Promise<void>;
   readonly resolveDone: () => void;
   readonly launchController: AbortController;
-  status: ImpStatus;
+  status: GoblinStatus;
   turns: number;
   tokens: { input: number; output: number };
   output?: string;
@@ -61,7 +61,7 @@ export interface Imp extends ImpSnapshot {
   cleanup?: Promise<void>;
 }
 
-export interface ImpSettings {
+export interface GoblinSettings {
   readonly turnLimit: number;
   readonly toolAllowlist: string[] | undefined;
   readonly modelPatterns: string[] | undefined;

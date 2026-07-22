@@ -22,7 +22,7 @@ interface Harness {
 const harnesses: Harness[] = [];
 
 async function createHarness(): Promise<Harness> {
-  const runtimeDir = await mkdtemp(join(tmpdir(), "pi-imps-"));
+  const runtimeDir = await mkdtemp(join(tmpdir(), "pi-goblins-"));
   const manifest: ChildManifest = {
     protocol: 1,
     ownerId: "owner",

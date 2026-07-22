@@ -36,8 +36,8 @@ function codingAgentVersion(): string {
 }
 
 export default function childBridge(pi: ExtensionAPI): void {
-  const manifestPath = process.env.PI_IMPS_MANIFEST;
-  if (process.env.PI_IMPS_CHILD !== "1" || !manifestPath) return;
+  const manifestPath = process.env.PI_GOBLINS_MANIFEST;
+  if (process.env.PI_GOBLINS_CHILD !== "1" || !manifestPath) return;
 
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ChildManifest;
   let socket: Socket | undefined;

@@ -35,7 +35,7 @@ function assistant(textBlocks: string[], stopReason: AssistantMessage["stopReaso
 }
 
 async function createHarness(turnLimit = 3): Promise<Harness> {
-  const root = await mkdtemp(join(tmpdir(), "pi-imps-child-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-goblins-child-"));
   const manifest: ChildManifest = {
     protocol: 1,
     ownerId: "owner",
@@ -73,8 +73,8 @@ async function createHarness(turnLimit = 3): Promise<Harness> {
   });
   const manifestPath = join(root, "manifest.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
-  process.env.PI_IMPS_CHILD = "1";
-  process.env.PI_IMPS_MANIFEST = manifestPath;
+  process.env.PI_GOBLINS_CHILD = "1";
+  process.env.PI_GOBLINS_MANIFEST = manifestPath;
   const pi = {
     on: (name: string, handler: (...args: unknown[]) => unknown) => harness.handlers.set(name, handler),
     sendUserMessage: harness.sendUserMessage,
@@ -95,8 +95,8 @@ async function eventually(predicate: () => boolean): Promise<void> {
 }
 
 afterEach(async () => {
-  delete process.env.PI_IMPS_CHILD;
-  delete process.env.PI_IMPS_MANIFEST;
+  delete process.env.PI_GOBLINS_CHILD;
+  delete process.env.PI_GOBLINS_MANIFEST;
   await Promise.all(
     harnesses.splice(0).map(async (harness) => {
       harness.client?.destroy();

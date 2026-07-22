@@ -1,6 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { parseImpSettings } from "../src/settings.js";
+import { parseGoblinSettings } from "../src/settings.js";
 import {
   buildPiArgs,
   isModelAllowed,
@@ -18,9 +18,9 @@ const defaults = { turnLimit: 30, toolAllowlist: undefined, modelPatterns: undef
 
 describe("settings policy", () => {
   it("distinguishes absent allowlists from explicit empty allowlists", () => {
-    expect(parseImpSettings(undefined)).toEqual(defaults);
-    expect(parseImpSettings({ turnLimit: 4 })).toEqual({ ...defaults, turnLimit: 4 });
-    expect(parseImpSettings({ toolAllowlist: [], modelPatterns: [] })).toEqual({
+    expect(parseGoblinSettings(undefined)).toEqual(defaults);
+    expect(parseGoblinSettings({ turnLimit: 4 })).toEqual({ ...defaults, turnLimit: 4 });
+    expect(parseGoblinSettings({ toolAllowlist: [], modelPatterns: [] })).toEqual({
       ...defaults,
       toolAllowlist: [],
       modelPatterns: [],
@@ -29,10 +29,10 @@ describe("settings policy", () => {
 
   it("fails closed for malformed policy arrays", () => {
     expect(() =>
-      parseImpSettings({ turnLimit: 1.5, toolAllowlist: ["read", 1, "write"], modelPatterns: ["openai/*"] }),
+      parseGoblinSettings({ turnLimit: 1.5, toolAllowlist: ["read", 1, "write"], modelPatterns: ["openai/*"] }),
     ).toThrow("toolAllowlist must be an array of non-empty strings");
-    expect(() => parseImpSettings({ toolAllowlist: ["read,bash"] })).toThrow("must not contain commas");
-    expect(() => parseImpSettings({ modelPatterns: "openai/*" })).toThrow("modelPatterns must be an array");
+    expect(() => parseGoblinSettings({ toolAllowlist: ["read,bash"] })).toThrow("must not contain commas");
+    expect(() => parseGoblinSettings({ modelPatterns: "openai/*" })).toThrow("modelPatterns must be an array");
   });
 });
 
@@ -100,10 +100,9 @@ describe("tool and child CLI policy", () => {
   it("preserves the allowlist tri-state and removes forbidden or duplicate tools", () => {
     expect(resolveTools({ ...defaults, toolAllowlist: undefined })).toBeUndefined();
     expect(resolveTools({ ...defaults, toolAllowlist: [] })).toEqual([]);
-    expect(resolveTools({ ...defaults, toolAllowlist: ["read", "", "summon", "read", "list_imps", "write"] })).toEqual([
-      "read",
-      "write",
-    ]);
+    expect(
+      resolveTools({ ...defaults, toolAllowlist: ["read", "", "summon", "read", "list_goblins", "write"] }),
+    ).toEqual(["read", "write"]);
   });
 
   it("renders approval and tool modes as Pi CLI arguments", () => {
@@ -119,7 +118,7 @@ describe("tool and child CLI policy", () => {
       "/bridge.ts",
       "--approve",
       "--exclude-tools",
-      "summon,wait,dismiss,list_imps",
+      "summon,wait,dismiss,list_goblins",
     ]);
     expect(
       buildPiArgs({ model: "provider/model", thinking: "off", trusted: false, tools: [] }, "/bridge.ts"),
@@ -138,7 +137,7 @@ describe("tool and child CLI policy", () => {
       "--tools",
       "read,write",
       "--exclude-tools",
-      "summon,wait,dismiss,list_imps",
+      "summon,wait,dismiss,list_goblins",
     ]);
   });
 });

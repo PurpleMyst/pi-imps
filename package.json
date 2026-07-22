@@ -1,19 +1,20 @@
 {
-  "name": "pi-imps",
+  "name": "pi-goblins",
   "version": "0.6.0",
   "packageManager": "npm@11.12.1",
-  "description": "Lightweight subagent orchestration for pi.",
+  "description": "Lightweight goblin orchestration for pi.",
   "license": "MIT",
   "author": "Jonas Damtoft",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Jomik/pi-imps.git"
+    "url": "git+https://github.com/Jomik/pi-goblins.git"
   },
-  "homepage": "https://github.com/Jomik/pi-imps",
+  "homepage": "https://github.com/Jomik/pi-goblins",
   "keywords": [
     "pi",
     "agent",
     "subagent",
+    "goblin",
     "orchestration",
     "llm"
   ],

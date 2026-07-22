@@ -1,8 +1,8 @@
-# pi-imps Herdr Design
+# pi-goblins Herdr Design
 
 ## Goal and supported versions
 
-Each imp is a Pi process and PTY owned by Herdr. The extension preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_imps`; named-agent selection and all named-agent configuration are removed.
+Each goblin is a Pi process and PTY owned by Herdr. The extension preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_goblins`; named-agent selection and all named-agent configuration are removed.
 
 Required versions:
 
@@ -16,27 +16,27 @@ The initial release guarantees cooperative cleanup. Recovery after a hard parent
 
 - `summon({ task, model?, thinking? })` returns without waiting for workspace creation, child readiness, prompting, or completion. First-use prerequisites and deterministic validation run before a name is allocated.
 - A returned name denotes one task and one terminal result. Later launch failures are stored as `failed` results.
-- `wait` supports `all`, `first`, and optional name filters. `first` never cancels other imps. Concurrent callers cannot collect the same imp.
+- `wait` supports `all`, `first`, and optional name filters. `first` never cancels other goblins. Concurrent callers cannot collect the same goblin.
 - Names remain reserved until collection or dismissal.
-- `dismiss` removes running or terminal uncollected imps. Dismissing a terminal imp discards its result without changing its status.
+- `dismiss` removes running or terminal uncollected goblins. Dismissing a terminal goblin discards its result without changing its status.
 - Session replacement, reload, and cooperative shutdown stop and clean every owned worker.
 - Results preserve the latest finalized assistant message's text blocks concatenated in order without separators. Provider failures preserve partial text and return `failed`; turn-limit results return `truncated`.
-- Child Pi processes cannot invoke `summon`, `wait`, `dismiss`, or `list_imps`.
+- Child Pi processes cannot invoke `summon`, `wait`, `dismiss`, or `list_goblins`.
 
-## Imp resources and identities
+## Goblin resources and identities
 
-Each imp has:
+Each goblin has:
 
 - a public in-memory record and generated public name;
 - a random owner ID, launch ID, nonce, and lowercase Herdr agent name;
-- a uniquely labelled `pi-imp-<public-name>-<launch-id>` workspace;
+- a uniquely labelled `pi-goblin-<public-name>-<launch-id>` workspace;
 - a private mode-0700 runtime directory, mode-0600 manifest, and Unix socket;
 - the child bridge extension; and
 - an idempotent memoized cleanup promise.
 
-Public and Herdr identities are separate. Workspace and agent responses are accepted only when their recorded workspace, pane, label, and internal agent identity match the imp.
+Public and Herdr identities are separate. Workspace and agent responses are accepted only when their recorded workspace, pane, label, and internal agent identity match the goblin.
 
-Herdr starts the workspace with `PI_IMPS_CHILD=1` and `PI_IMPS_MANIFEST=<absolute path>`. When `PI_IMPS_CHILD=1`, the main extension returns before registering any tools, hooks, prompt text, or UI. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
+Herdr starts the workspace with `PI_GOBLINS_CHILD=1` and `PI_GOBLINS_MANIFEST=<absolute path>`. When `PI_GOBLINS_CHILD=1`, the main extension returns before registering any tools, hooks, prompt text, or UI. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
 
 ## Prerequisites and deterministic validation
 
@@ -70,9 +70,9 @@ Model source order is explicit `summon.model`, then the current parent model. Av
 
 Requested values match exact canonical ID, then exact candidate ID, then exact candidate name. At every tier, a raw match denied by policy fails immediately rather than falling through. Allowed matches are deduplicated by canonical ID; multiple canonical matches are ambiguous.
 
-Optional global `modelPatterns` in `~/.pi/agent/imps.json` is a case-sensitive, whole-string canonical model allowlist. Only `*` and `?` are wildcards. Omission permits all models; `[]` permits none. Project configuration cannot broaden it.
+Optional global `modelPatterns` in `~/.pi/agent/goblins.json` is a case-sensitive, whole-string canonical model allowlist. Only `*` and `?` are wildcards. Omission permits all models; `[]` permits none. Project configuration cannot broaden it.
 
-The child always receives canonical `provider/model`. Tool selection is tri-state after removing the four imp tools:
+The child always receives canonical `provider/model`. Tool selection is tri-state after removing the four goblin tools:
 
 | Resolved tools | Pi arguments |
 | --- | --- |
@@ -80,7 +80,7 @@ The child always receives canonical `provider/model`. Tool selection is tri-stat
 | `[]` | `--no-tools` |
 | non-empty | `--tools <comma-separated>` |
 
-Every child also receives `--exclude-tools summon,wait,dismiss,list_imps`, `--no-session`, the selected thinking level, the bridge extension, and `--approve` or `--no-approve` captured from `ctx.isProjectTrusted()` at summon time.
+Every child also receives `--exclude-tools summon,wait,dismiss,list_goblins`, `--no-session`, the selected thinking level, the bridge extension, and `--approve` or `--no-approve` captured from `ctx.isProjectTrusted()` at summon time.
 
 ## Launch and prompting
 
@@ -96,7 +96,7 @@ herdr agent prompt NAME TASK --wait --until idle --until done
 
 Its successful identity-matched response is the only Herdr completion signal. `blocked` is display state, not completion, and there is no task wall-clock timeout.
 
-Herdr state is refreshed only for `list_imps`, active wait progress, and brief dismissal cleanup. Per-imp refreshes are single-flight and cached for about one second. They are display/diagnostic data and never settle a result.
+Herdr state is refreshed only for `list_goblins`, active wait progress, and brief dismissal cleanup. Per-goblin refreshes are single-flight and cached for about one second. They are display/diagnostic data and never settle a result.
 
 ## Child bridge protocol
 
@@ -122,13 +122,13 @@ At turn `limit - 1`, the bridge steers the final-turn directive. At turn `limit`
 
 ## Terminalization, collection, and dismissal
 
-One first-write-wins terminal compare-and-set governs each imp.
+One first-write-wins terminal compare-and-set governs each goblin.
 
-`completed` and provider `failed` require both a validated bridge result and successful identity-matched prompt response. The counterpart has three seconds to arrive after the first signal; otherwise the imp receives a stable coordination failure. `truncated` requires only its validated bridge result. `dismissed` can win only while running. Later protocol errors are diagnostics.
+`completed` and provider `failed` require both a validated bridge result and successful identity-matched prompt response. The counterpart has three seconds to arrive after the first signal; otherwise the goblin receives a stable coordination failure. `truncated` requires only its validated bridge result. `dismissed` can win only while running. Later protocol errors are diagnostics.
 
-Every wait mode and dismissal uses one synchronous claim operation. Claim verifies map identity, atomically removes the record, releases the name, and returns a frozen snapshot. An aborted wait claims nothing. A `wait(first)` loser re-evaluates eligible imps and returns empty if none remain.
+Every wait mode and dismissal uses one synchronous claim operation. Claim verifies map identity, atomically removes the record, releases the name, and returns a frozen snapshot. An aborted wait claims nothing. A `wait(first)` loser re-evaluates eligible goblins and returns empty if none remain.
 
-Running dismissal publishes local `dismissed`, resolves local completion, claims/removes the imp, then starts asynchronous interruption. Terminal dismissal preserves and discards the existing result and returns the name.
+Running dismissal publishes local `dismissed`, resolves local completion, claims/removes the goblin, then starts asynchronous interruption. Terminal dismissal preserves and discards the existing result and returns the name.
 
 ## Cleanup and shutdown
 
@@ -143,7 +143,7 @@ Cleanup is memoized and idempotent:
 
 Cleanup promises are tracked independently of the public map. Cooperative shutdown uses one shared promise and one absolute 65-second barrier for quit, reload, new/resume, fork/clone, and other session replacement flows. The extension never stops the Herdr server.
 
-A hard parent crash can leave workspaces. Identify labels beginning `pi-imp-` with `herdr workspace list`, inspect them, and close the relevant ID with `herdr workspace close <id>`. Automatic orphan reconciliation is deliberately deferred.
+A hard parent crash can leave workspaces. Identify labels beginning `pi-goblin-` with `herdr workspace list`, inspect them, and close the relevant ID with `herdr workspace close <id>`. Automatic orphan reconciliation is deliberately deferred.
 
 ## Verification
 

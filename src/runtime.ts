@@ -15,10 +15,10 @@ import {
 import { createNamePool } from "./names.js";
 import type {
   ChildManifest,
+  Goblin,
+  GoblinSettings,
+  GoblinSnapshot,
   HerdrStatus,
-  Imp,
-  ImpSettings,
-  ImpSnapshot,
   OwnedWorkspace,
   TerminalResult,
   ThinkingLevel,
@@ -54,12 +54,12 @@ export interface PrepareOptions {
 }
 
 export interface RuntimeOptions {
-  readonly settings: ImpSettings;
+  readonly settings: GoblinSettings;
   readonly bridgePath: string;
   readonly runtimeRoot?: string;
   readonly runner?: CommandRunner;
   readonly prerequisites?: Prerequisites;
-  readonly bridgeFactory?: (manifest: ChildManifest, imp: Imp, runtime: ImpRuntime) => BridgeServer;
+  readonly bridgeFactory?: (manifest: ChildManifest, goblin: Goblin, runtime: GoblinRuntime) => BridgeServer;
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -77,21 +77,21 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function immutableSnapshot(imp: Imp): ImpSnapshot {
+function immutableSnapshot(goblin: Goblin): GoblinSnapshot {
   return Object.freeze({
-    name: imp.name,
-    status: imp.status,
-    turns: imp.turns,
-    tokens: Object.freeze({ ...imp.tokens }),
-    ...(imp.output !== undefined ? { output: imp.output } : {}),
-    ...(imp.error !== undefined ? { error: imp.error } : {}),
-    ...(imp.activity !== undefined ? { activity: imp.activity } : {}),
-    ...(imp.herdrStatus !== undefined ? { herdrStatus: imp.herdrStatus } : {}),
+    name: goblin.name,
+    status: goblin.status,
+    turns: goblin.turns,
+    tokens: Object.freeze({ ...goblin.tokens }),
+    ...(goblin.output !== undefined ? { output: goblin.output } : {}),
+    ...(goblin.error !== undefined ? { error: goblin.error } : {}),
+    ...(goblin.activity !== undefined ? { activity: goblin.activity } : {}),
+    ...(goblin.herdrStatus !== undefined ? { herdrStatus: goblin.herdrStatus } : {}),
   });
 }
 
 function internalAgentName(launchId: string): string {
-  return `piimp-${launchId.replace(/-/g, "").slice(0, 24)}`;
+  return `pigoblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
 }
 
 function identityMatches(agent: Record<string, unknown>, workspace: OwnedWorkspace): boolean {
@@ -102,8 +102,8 @@ function identityMatches(agent: Record<string, unknown>, workspace: OwnedWorkspa
   );
 }
 
-export class ImpRuntime {
-  readonly imps = new Map<string, Imp>();
+export class GoblinRuntime {
+  readonly goblins = new Map<string, Goblin>();
   readonly ownerId = randomUUID();
   private readonly names = createNamePool();
   private readonly runner: CommandRunner;
@@ -115,7 +115,8 @@ export class ImpRuntime {
   constructor(private readonly options: RuntimeOptions) {
     this.runner = options.runner ?? runCommand;
     this.prerequisites = options.prerequisites ?? new Prerequisites(this.runner);
-    this.runtimeRoot = options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-imps-${this.ownerId.slice(0, 8)}`);
+    this.runtimeRoot =
+      options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${this.ownerId.slice(0, 8)}`);
   }
 
   async prepare(options: PrepareOptions): Promise<PreparedLaunch> {
@@ -145,11 +146,11 @@ export class ImpRuntime {
     };
   }
 
-  summon(prepared: PreparedLaunch, cwd: string): Imp {
+  summon(prepared: PreparedLaunch, cwd: string): Goblin {
     const name = this.names.allocate();
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => (resolveDone = resolve));
-    const imp: Imp = {
+    const goblin: Goblin = {
       name,
       task: prepared.task,
       launchId: prepared.launchId,
@@ -165,62 +166,63 @@ export class ImpRuntime {
       resolveDone,
       launchController: new AbortController(),
     };
-    this.imps.set(name, imp);
-    imp.launchPromise = this.launch(imp, prepared, cwd).catch((error) => this.fail(imp, error));
-    return imp;
+    this.goblins.set(name, goblin);
+    goblin.launchPromise = this.launch(goblin, prepared, cwd).catch((error) => this.fail(goblin, error));
+    return goblin;
   }
 
-  private createBridge(manifest: ChildManifest, imp: Imp): BridgeServer {
-    if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest, imp, this);
+  private createBridge(manifest: ChildManifest, goblin: Goblin): BridgeServer {
+    if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest, goblin, this);
     return new BridgeServer(manifest, {
       onReady: () => {
-        imp.bridgeReady = true;
-        this.readyResolvers.get(imp.launchId)?.();
+        goblin.bridgeReady = true;
+        this.readyResolvers.get(goblin.launchId)?.();
       },
       onTool: (activity) => {
-        if (imp.status === "running") imp.activity = activity;
+        if (goblin.status === "running") goblin.activity = activity;
       },
       onTurn: (turns, tokens) => {
-        if (imp.status !== "running") return;
-        imp.turns = turns;
-        imp.tokens = { ...tokens };
+        if (goblin.status !== "running") return;
+        goblin.turns = turns;
+        goblin.tokens = { ...tokens };
       },
-      onResult: (result) => this.bridgeResult(imp, result),
+      onResult: (result) => this.bridgeResult(goblin, result),
       onError: (error) => {
         if (shouldInvalidatePreflight(error)) this.prerequisites.invalidate();
-        if (imp.status === "running" && !imp.bridgeResult) this.fail(imp, error);
+        if (goblin.status === "running" && !goblin.bridgeResult) this.fail(goblin, error);
       },
     });
   }
 
   private readonly readyResolvers = new Map<string, () => void>();
 
-  private async launch(imp: Imp, prepared: PreparedLaunch, cwd: string): Promise<void> {
+  private async launch(goblin: Goblin, prepared: PreparedLaunch, cwd: string): Promise<void> {
     const deadline = Date.now() + LAUNCH_DEADLINE_MS;
     const manifest: ChildManifest = {
       protocol: 1,
-      ownerId: imp.ownerId,
-      launchId: imp.launchId,
-      nonce: imp.nonce,
-      socketPath: imp.socketPath,
+      ownerId: goblin.ownerId,
+      launchId: goblin.launchId,
+      nonce: goblin.nonce,
+      socketPath: goblin.socketPath,
       turnLimit: this.options.settings.turnLimit,
     };
-    const bridge = this.createBridge(manifest, imp);
-    imp.cleanup = undefined;
-    await mkdir(imp.runtimeDir, { recursive: true, mode: 0o700 });
-    await writeFile(join(imp.runtimeDir, "manifest.json"), JSON.stringify(manifest), { mode: 0o600, flag: "wx" }).catch(
-      async (error) => {
-        await rm(imp.runtimeDir, { recursive: true, force: true });
-        throw error;
-      },
-    );
-    await bridge.listen(imp.runtimeDir);
-    this.bridges.set(imp.launchId, bridge);
+    const bridge = this.createBridge(manifest, goblin);
+    goblin.cleanup = undefined;
+    await mkdir(goblin.runtimeDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(goblin.runtimeDir, "manifest.json"), JSON.stringify(manifest), {
+      mode: 0o600,
+      flag: "wx",
+    }).catch(async (error) => {
+      await rm(goblin.runtimeDir, { recursive: true, force: true });
+      throw error;
+    });
+    await bridge.listen(goblin.runtimeDir);
+    this.bridges.set(goblin.launchId, bridge);
 
     const remaining = () => deadline - Date.now();
-    const label = `pi-imp-${imp.name}-${imp.launchId}`;
+    const label = `pi-goblin-${goblin.name}-${goblin.launchId}`;
     let finishWorkspaceCreate!: () => void;
-    imp.workspaceCreateDone = new Promise<void>((resolve) => (finishWorkspaceCreate = resolve));
+    goblin.workspaceCreateDone = new Promise<void>((resolve) => (finishWorkspaceCreate = resolve));
     let workspaceResult: Record<string, unknown>;
     try {
       workspaceResult = await this.command(
@@ -232,12 +234,12 @@ export class ImpRuntime {
           "--label",
           label,
           "--env",
-          "PI_IMPS_CHILD=1",
+          "PI_GOBLINS_CHILD=1",
           "--env",
-          `PI_IMPS_MANIFEST=${join(imp.runtimeDir, "manifest.json")}`,
+          `PI_GOBLINS_MANIFEST=${join(goblin.runtimeDir, "manifest.json")}`,
           "--no-focus",
         ],
-        imp.launchController.signal,
+        goblin.launchController.signal,
         remaining(),
       );
     } finally {
@@ -254,11 +256,11 @@ export class ImpRuntime {
     ) {
       throw new Error("Malformed or identity-mismatched Herdr workspace creation response");
     }
-    imp.workspace = {
+    goblin.workspace = {
       workspaceId: workspace.workspace_id,
       paneId: rootPane.pane_id,
       label,
-      agentName: internalAgentName(imp.launchId),
+      agentName: internalAgentName(goblin.launchId),
     };
 
     const args = buildPiArgs(
@@ -279,57 +281,57 @@ export class ImpRuntime {
           [
             "agent",
             "start",
-            imp.workspace.agentName,
+            goblin.workspace.agentName,
             "--kind",
             "pi",
             "--pane",
-            imp.workspace.paneId,
+            goblin.workspace.paneId,
             "--timeout",
             String(Math.floor(left)),
             "--",
             ...args,
           ],
-          imp.launchController.signal,
+          goblin.launchController.signal,
           left,
         );
         const agent = started.agent as Record<string, unknown> | undefined;
-        if (started.type !== "agent_started" || !agent || !identityMatches(agent, imp.workspace)) {
+        if (started.type !== "agent_started" || !agent || !identityMatches(agent, goblin.workspace)) {
           throw new Error("Herdr agent start identity mismatch");
         }
         break;
       } catch (error) {
         if (!(error instanceof HerdrCommandError) || error.code !== "agent_pane_busy" || Date.now() >= busyUntil)
           throw error;
-        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), imp.launchController.signal);
+        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), goblin.launchController.signal);
         if (Date.now() >= busyUntil) throw error;
       }
     }
 
-    if (!imp.bridgeReady) {
+    if (!goblin.bridgeReady) {
       const ready = new Promise<void>((resolve) => {
-        this.readyResolvers.set(imp.launchId, resolve);
-        if (imp.bridgeReady) resolve();
+        this.readyResolvers.set(goblin.launchId, resolve);
+        if (goblin.bridgeReady) resolve();
       });
       await Promise.race([
         ready,
-        delay(Math.max(0, remaining()), imp.launchController.signal).then(() => {
+        delay(Math.max(0, remaining()), goblin.launchController.signal).then(() => {
           throw new Error("Timed out waiting for authenticated child readiness");
         }),
       ]);
-      this.readyResolvers.delete(imp.launchId);
+      this.readyResolvers.delete(goblin.launchId);
     }
     if (remaining() <= 0) throw new Error("The shared launch deadline expired before prompting");
 
     const prompted = await this.command(
-      ["agent", "prompt", imp.workspace.agentName, imp.task, "--wait", "--until", "idle", "--until", "done"],
-      imp.launchController.signal,
+      ["agent", "prompt", goblin.workspace.agentName, goblin.task, "--wait", "--until", "idle", "--until", "done"],
+      goblin.launchController.signal,
     );
     const promptAgent = prompted.agent as Record<string, unknown> | undefined;
-    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, imp.workspace)) {
+    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, goblin.workspace)) {
       throw new Error("Herdr prompt response identity mismatch");
     }
-    imp.promptSucceeded = true;
-    this.coordinate(imp);
+    goblin.promptSucceeded = true;
+    this.coordinate(goblin);
   }
 
   private readonly bridges = new Map<string, BridgeServer>();
@@ -347,117 +349,120 @@ export class ImpRuntime {
     }
   }
 
-  private bridgeResult(imp: Imp, result: TerminalResult): void {
-    if (imp.status !== "running" || imp.bridgeResult) return;
-    imp.bridgeResult = Object.freeze({ ...result });
-    if (result.status === "truncated") this.terminalize(imp, result);
-    else this.coordinate(imp);
+  private bridgeResult(goblin: Goblin, result: TerminalResult): void {
+    if (goblin.status !== "running" || goblin.bridgeResult) return;
+    goblin.bridgeResult = Object.freeze({ ...result });
+    if (result.status === "truncated") this.terminalize(goblin, result);
+    else this.coordinate(goblin);
   }
 
-  private coordinate(imp: Imp): void {
-    if (imp.status !== "running") return;
-    if (imp.bridgeResult && imp.promptSucceeded) {
-      if (imp.coordinationTimer) clearTimeout(imp.coordinationTimer);
-      this.terminalize(imp, imp.bridgeResult);
+  private coordinate(goblin: Goblin): void {
+    if (goblin.status !== "running") return;
+    if (goblin.bridgeResult && goblin.promptSucceeded) {
+      if (goblin.coordinationTimer) clearTimeout(goblin.coordinationTimer);
+      this.terminalize(goblin, goblin.bridgeResult);
       return;
     }
-    if ((imp.bridgeResult || imp.promptSucceeded) && !imp.coordinationTimer) {
-      imp.coordinationTimer = setTimeout(
+    if ((goblin.bridgeResult || goblin.promptSucceeded) && !goblin.coordinationTimer) {
+      goblin.coordinationTimer = setTimeout(
         () =>
-          this.fail(imp, new Error("Bridge result and Herdr prompt completion did not coordinate within 3 seconds")),
+          this.fail(goblin, new Error("Bridge result and Herdr prompt completion did not coordinate within 3 seconds")),
         COORDINATION_MS,
       );
     }
   }
 
-  private fail(imp: Imp, error: unknown): void {
-    this.terminalize(imp, {
+  private fail(goblin: Goblin, error: unknown): void {
+    this.terminalize(goblin, {
       status: "failed",
-      output: imp.bridgeResult?.output ?? "",
+      output: goblin.bridgeResult?.output ?? "",
       error: error instanceof Error ? error.message : String(error),
     });
   }
 
-  private terminalize(imp: Imp, result: TerminalResult | { status: "dismissed" }): boolean {
-    if (imp.status !== "running") return false;
-    if (imp.coordinationTimer) clearTimeout(imp.coordinationTimer);
-    imp.status = result.status;
-    if ("output" in result) imp.output = result.output;
-    if ("error" in result) imp.error = result.error;
-    imp.completedAt = Date.now();
-    imp.resolveDone();
-    queueMicrotask(() => this.trackCleanup(imp));
+  private terminalize(goblin: Goblin, result: TerminalResult | { status: "dismissed" }): boolean {
+    if (goblin.status !== "running") return false;
+    if (goblin.coordinationTimer) clearTimeout(goblin.coordinationTimer);
+    goblin.status = result.status;
+    if ("output" in result) goblin.output = result.output;
+    if ("error" in result) goblin.error = result.error;
+    goblin.completedAt = Date.now();
+    goblin.resolveDone();
+    queueMicrotask(() => this.trackCleanup(goblin));
     return true;
   }
 
-  claim(imp: Imp): ImpSnapshot | undefined {
-    if (imp.status === "running") return undefined;
-    return this.collect(imp);
+  claim(goblin: Goblin): GoblinSnapshot | undefined {
+    if (goblin.status === "running") return undefined;
+    return this.collect(goblin);
   }
 
-  private collect(imp: Imp): ImpSnapshot | undefined {
-    if (this.imps.get(imp.name) !== imp) return undefined;
-    this.imps.delete(imp.name);
-    this.names.release(imp.name);
-    const snapshot = immutableSnapshot(imp);
-    this.trackCleanup(imp);
+  private collect(goblin: Goblin): GoblinSnapshot | undefined {
+    if (this.goblins.get(goblin.name) !== goblin) return undefined;
+    this.goblins.delete(goblin.name);
+    this.names.release(goblin.name);
+    const snapshot = immutableSnapshot(goblin);
+    this.trackCleanup(goblin);
     return snapshot;
   }
 
   dismiss(name: string): string[] {
     const targets =
-      name === "all" ? [...this.imps.values()] : [this.imps.get(name)].filter((imp): imp is Imp => Boolean(imp));
+      name === "all"
+        ? [...this.goblins.values()]
+        : [this.goblins.get(name)].filter((goblin): goblin is Goblin => Boolean(goblin));
     const dismissed: string[] = [];
-    for (const imp of targets) {
-      if (imp.status === "running") this.terminalize(imp, { status: "dismissed" });
-      if (this.collect(imp)) dismissed.push(imp.name);
+    for (const goblin of targets) {
+      if (goblin.status === "running") this.terminalize(goblin, { status: "dismissed" });
+      if (this.collect(goblin)) dismissed.push(goblin.name);
     }
     return dismissed;
   }
 
-  snapshots(): ImpSnapshot[] {
-    return [...this.imps.values()].map(immutableSnapshot);
+  snapshots(): GoblinSnapshot[] {
+    return [...this.goblins.values()].map(immutableSnapshot);
   }
 
-  async refresh(imp: Imp): Promise<void> {
-    if (!imp.workspace || imp.status !== "running") return;
-    if (imp.refreshedAt && Date.now() - imp.refreshedAt < REFRESH_CACHE_MS) return;
-    if (imp.refreshPromise) return imp.refreshPromise;
-    imp.refreshPromise = (async () => {
+  async refresh(goblin: Goblin): Promise<void> {
+    if (!goblin.workspace || goblin.status !== "running") return;
+    if (goblin.refreshedAt && Date.now() - goblin.refreshedAt < REFRESH_CACHE_MS) return;
+    if (goblin.refreshPromise) return goblin.refreshPromise;
+    goblin.refreshPromise = (async () => {
       try {
-        const result = await this.command(["agent", "get", imp.workspace?.agentName ?? ""]);
+        const result = await this.command(["agent", "get", goblin.workspace?.agentName ?? ""]);
         const agent = result.agent as Record<string, unknown> | undefined;
-        if (result.type !== "agent_info" || !agent || !imp.workspace || !identityMatches(agent, imp.workspace)) return;
+        if (result.type !== "agent_info" || !agent || !goblin.workspace || !identityMatches(agent, goblin.workspace))
+          return;
         if (["idle", "working", "blocked", "done", "unknown"].includes(String(agent.agent_status))) {
-          imp.herdrStatus = agent.agent_status as HerdrStatus;
+          goblin.herdrStatus = agent.agent_status as HerdrStatus;
         }
       } catch {
-        // Display-only refresh never settles an imp.
+        // Display-only refresh never settles a goblin.
       } finally {
-        imp.refreshedAt = Date.now();
-        imp.refreshPromise = undefined;
+        goblin.refreshedAt = Date.now();
+        goblin.refreshPromise = undefined;
       }
     })();
-    return imp.refreshPromise;
+    return goblin.refreshPromise;
   }
 
-  async refreshAll(imps: readonly Imp[] = [...this.imps.values()]): Promise<void> {
-    await Promise.all(imps.map((imp) => this.refresh(imp)));
+  async refreshAll(goblins: readonly Goblin[] = [...this.goblins.values()]): Promise<void> {
+    await Promise.all(goblins.map((goblin) => this.refresh(goblin)));
   }
 
-  private trackCleanup(imp: Imp): void {
-    const cleanup = this.cleanup(imp);
+  private trackCleanup(goblin: Goblin): void {
+    const cleanup = this.cleanup(goblin);
     this.cleanups.add(cleanup);
     cleanup.finally(() => this.cleanups.delete(cleanup)).catch(() => {});
   }
 
-  cleanup(imp: Imp): Promise<void> {
-    if (imp.cleanup) return imp.cleanup;
-    imp.cleanup = (async () => {
-      await imp.workspaceCreateDone?.catch(() => {});
-      imp.launchController.abort();
-      await imp.launchPromise?.catch(() => {});
-      const workspace = imp.workspace;
+  cleanup(goblin: Goblin): Promise<void> {
+    if (goblin.cleanup) return goblin.cleanup;
+    goblin.cleanup = (async () => {
+      await goblin.workspaceCreateDone?.catch(() => {});
+      goblin.launchController.abort();
+      await goblin.launchPromise?.catch(() => {});
+      const workspace = goblin.workspace;
       if (workspace) {
         let owned = false;
         let live = false;
@@ -492,13 +497,13 @@ export class ImpRuntime {
         } catch {}
       }
       await this.bridges
-        .get(imp.launchId)
+        .get(goblin.launchId)
         ?.close()
         .catch(() => {});
-      this.bridges.delete(imp.launchId);
-      await rm(imp.runtimeDir, { recursive: true, force: true });
+      this.bridges.delete(goblin.launchId);
+      await rm(goblin.runtimeDir, { recursive: true, force: true });
     })();
-    return imp.cleanup;
+    return goblin.cleanup;
   }
 
   shutdown(): Promise<void> {

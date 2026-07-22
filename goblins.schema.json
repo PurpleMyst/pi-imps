@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/Jomik/pi-imps/blob/main/imps.schema.json",
-  "title": "pi-imps configuration",
-  "description": "Global configuration for Herdr-owned Pi imps. Place at ~/.pi/agent/imps.json.",
+  "$id": "https://github.com/Jomik/pi-goblins/blob/main/goblins.schema.json",
+  "title": "pi-goblins configuration",
+  "description": "Global configuration for Herdr-owned Pi goblins. Place at ~/.pi/agent/goblins.json.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -1,9 +1,9 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ImpSettings, ThinkingLevel } from "./types.js";
+import type { GoblinSettings, ThinkingLevel } from "./types.js";
 
 const MAX_TASK_BYTES = 64 * 1024;
 const MAX_SOCKET_PATH_BYTES = 103;
-const EXCLUDED_TOOLS = ["summon", "wait", "dismiss", "list_imps"] as const;
+const EXCLUDED_TOOLS = ["summon", "wait", "dismiss", "list_goblins"] as const;
 
 export function validateTask(task: string): void {
   if (task.includes("\0")) throw new Error("Task must not contain NUL bytes");
@@ -100,7 +100,7 @@ export function buildPiArgs(selection: ChildSelection, bridgePath: string): stri
   return args;
 }
 
-export function resolveTools(settings: ImpSettings): string[] | undefined {
+export function resolveTools(settings: GoblinSettings): string[] | undefined {
   return settings.toolAllowlist === undefined
     ? undefined
     : [...new Set(settings.toolAllowlist.filter((tool) => tool.length > 0 && !EXCLUDED_TOOLS.includes(tool as never)))];

@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { ImpSnapshot } from "./types.js";
+import type { GoblinSnapshot } from "./types.js";
 
 const SPINNER = "·•✧✦✧•";
 
@@ -8,23 +8,26 @@ function formatTokens(value: number): string {
   return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
 }
 
-function stats(imp: ImpSnapshot, theme: Theme): string {
-  return theme.fg("dim", `(${imp.turns}⟳ ${formatTokens(imp.tokens.input)}↓ ${formatTokens(imp.tokens.output)}↑)`);
+function stats(goblin: GoblinSnapshot, theme: Theme): string {
+  return theme.fg(
+    "dim",
+    `(${goblin.turns}⟳ ${formatTokens(goblin.tokens.input)}↓ ${formatTokens(goblin.tokens.output)}↑)`,
+  );
 }
 
-export function formatImpStatusDisplay(imp: ImpSnapshot, theme: Theme, frame: number): string {
-  const name = theme.fg("accent", imp.name);
-  switch (imp.status) {
+export function formatGoblinStatusDisplay(goblin: GoblinSnapshot, theme: Theme, frame: number): string {
+  const name = theme.fg("accent", goblin.name);
+  switch (goblin.status) {
     case "running":
-      return `${theme.fg("accent", SPINNER[frame % SPINNER.length] ?? "·")} ${name} ${stats(imp, theme)}\n  ${imp.activity ?? theme.fg("dim", imp.herdrStatus ?? "starting")}`;
+      return `${theme.fg("accent", SPINNER[frame % SPINNER.length] ?? "·")} ${name} ${stats(goblin, theme)}\n  ${goblin.activity ?? theme.fg("dim", goblin.herdrStatus ?? "starting")}`;
     case "completed":
-      return `${theme.fg("success", "✓")} ${name} ${stats(imp, theme)}`;
+      return `${theme.fg("success", "✓")} ${name} ${stats(goblin, theme)}`;
     case "failed":
       return `${theme.fg("error", "✗")} ${name}`;
     case "dismissed":
       return `${theme.fg("dim", "⊘")} ${name}`;
     case "truncated":
-      return `${theme.fg("warning", "!")} ${name} ${stats(imp, theme)}`;
+      return `${theme.fg("warning", "!")} ${name} ${stats(goblin, theme)}`;
   }
 }
 
@@ -49,11 +52,11 @@ export function formatSummonCall(
   return `${theme.fg("toolTitle", theme.bold("summon"))}${metadata}\n${visible.map((line) => `  ${theme.fg("dim", line)}`).join("\n")}${hint}`;
 }
 
-export function formatWaitDisplay(imps: ImpSnapshot[], mode: "all" | "first", theme: Theme, frame = 0): string {
-  if (imps.length === 0) return theme.fg("dim", "No uncollected imps.");
-  const winner = imps[0];
+export function formatWaitDisplay(goblins: GoblinSnapshot[], mode: "all" | "first", theme: Theme, frame = 0): string {
+  if (goblins.length === 0) return theme.fg("dim", "No uncollected goblins.");
+  const winner = goblins[0];
   if (mode === "first" && winner && winner.status !== "running") {
     return `${theme.fg("accent", winner.name)} finished first ${stats(winner, theme)}`;
   }
-  return imps.map((imp, index) => formatImpStatusDisplay(imp, theme, frame + index)).join("\n");
+  return goblins.map((goblin, index) => formatGoblinStatusDisplay(goblin, theme, frame + index)).join("\n");
 }
