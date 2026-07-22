@@ -176,7 +176,7 @@ export class GoblinRuntime {
     lifecycle.attachBridge(bridge);
 
     const remaining = () => deadline - Date.now();
-    const label = `pi-goblin-${record.name}-${prepared.launchId}`;
+    const label = record.name;
     const tabResult = await this.command(
       [
         "tab",

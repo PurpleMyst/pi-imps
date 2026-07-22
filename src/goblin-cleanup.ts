@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import type { GoblinLifecycle } from "./goblin-lifecycle.js";
-import { type HerdrResponse, parseTabInfo } from "./herdr.js";
+import type { HerdrResponse } from "./herdr.js";
 
 const SHUTDOWN_BARRIER_MS = 65_000;
 
@@ -34,14 +34,7 @@ export class GoblinCleanup {
 
     const tab = lifecycle.getTab();
     if (tab) {
-      try {
-        const current = parseTabInfo(await this.command(["tab", "get", tab.tabId], undefined, 3_000));
-        if (current?.tabId === tab.tabId && current.label === tab.label) {
-          await this.command(["tab", "close", tab.tabId], undefined, 5_000).catch(() => {});
-        }
-      } catch {
-        // The tab may already be gone; cleanup continues independently.
-      }
+      await this.command(["tab", "close", tab.tabId], undefined, 5_000).catch(() => {});
     }
     await lifecycle.closeBridge().catch(() => {});
     await rm(lifecycle.runtimeDir, { recursive: true, force: true });

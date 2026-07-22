@@ -32,7 +32,6 @@ interface FakeOptions {
   malformedStart?: boolean;
   malformedPrompt?: boolean;
   malformedTabCreation?: boolean;
-  tabLabelMismatch?: boolean;
   stalledRefresh?: boolean;
 }
 
@@ -130,19 +129,6 @@ async function setup(options: FakeOptions = {}) {
       return envelope({
         type: options.malformedPrompt ? "ok" : "agent_prompted",
         agent: identity,
-      });
-    }
-    if (args[0] === "tab" && args[1] === "get" && args[2] === "w1:t2") {
-      const create = calls.find((call) => call[1] === "tab" && call[2] === "create") ?? [];
-      const label = create[create.indexOf("--label") + 1];
-      return envelope({
-        type: "tab_info",
-        tab: {
-          tab_id: "w1:t2",
-          workspace_id: "w1",
-          label: options.tabLabelMismatch ? "different" : label,
-          pane_count: 1,
-        },
       });
     }
     if (args[0] === "pane" && args[1] === "get" && args[2] === "w1:p2")
@@ -354,13 +340,17 @@ describe("GoblinRuntime lifecycle", () => {
     await runtime.shutdown();
   });
 
-  it("does not close a tab whose label changed", async () => {
-    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000, tabLabelMismatch: true });
+  it("labels the tab with the goblin name and closes it by ID", async () => {
+    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000 });
     const name = runtime.summon(prepared, "/tmp");
     await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    const create = calls.find((call) => call[1] === "tab" && call[2] === "create");
+    expect(create?.[create.indexOf("--label") + 1]).toBe(name);
+
     runtime.dismiss(name);
     await runtime.shutdown();
-    expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
+    expect(calls.some((call) => call[1] === "tab" && call[2] === "get")).toBe(false);
+    expect(calls.some((call) => call[1] === "tab" && call[2] === "close" && call[3] === "w1:t2")).toBe(true);
   });
 
   it("memoizes shutdown without retaining the 65-second barrier after cleanup", async () => {

@@ -90,7 +90,6 @@ Cleanup is memoized and bounded:
 abort active commands
 → await launch teardown
 → fetch the stored tab ID
-→ verify its label
 → close the tab
 → close the bridge
 → remove the runtime directory

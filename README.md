@@ -76,13 +76,9 @@ Named agents, agent frontmatter, `additionalExtensions`, per-agent grants, and p
 
 ## Lifecycle and cleanup
 
-Each goblin uses a private Unix socket and runtime directory plus a tab in the parent workspace labelled:
+Each goblin uses a private Unix socket and runtime directory plus a tab in the parent workspace labelled with its public name.
 
-```text
-pi-goblin-<public-name>-<full-launch-id>
-```
-
-Collection can finish before asynchronous tab cleanup, but cooperative Pi shutdown waits for tracked cleanup. pi-goblins never stops the Herdr server or closes the parent workspace. It fetches the stored tab ID and closes it only when the recorded label still matches.
+Collection can finish before asynchronous tab cleanup, but cooperative Pi shutdown waits for tracked cleanup. pi-goblins never stops the Herdr server or closes the parent workspace. It closes each ephemeral goblin tab by its stored tab ID.
 
 A hard parent crash or power loss may leave a tab. Automatic orphan recovery is deferred. To clean one manually:
 
@@ -91,6 +87,6 @@ herdr tab list --workspace <workspace-id>
 herdr tab close <tab-id>
 ```
 
-Only close labels beginning `pi-goblin-` after confirming they belong to abandoned work.
+Only close tabs you have confirmed belong to abandoned goblin work.
 
 See [DESIGN.md](./DESIGN.md) for the complete protocol and lifecycle contract.

@@ -79,7 +79,7 @@ async function tabForGoblin(name: string): Promise<LiveGoblin["tab"] | undefined
   for (const value of result.tabs) {
     if (typeof value !== "object" || value === null) continue;
     const tab = value as Record<string, unknown>;
-    if (typeof tab.tab_id === "string" && typeof tab.label === "string" && tab.label.startsWith(`pi-goblin-${name}-`)) {
+    if (typeof tab.tab_id === "string" && tab.label === name) {
       return { tabId: tab.tab_id, label: tab.label };
     }
   }
