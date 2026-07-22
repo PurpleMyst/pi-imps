@@ -1,6 +1,7 @@
 {
   "name": "pi-goblins",
   "version": "0.6.0",
+  "private": true,
   "packageManager": "npm@11.12.1",
   "description": "Lightweight goblin orchestration for pi.",
   "license": "MIT",
@@ -30,6 +31,7 @@
     ]
   },
   "scripts": {
+    "prepublishOnly": "node -e \"console.error('npm publishing is disabled for this package'); process.exit(1)\"",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "lint:fix": "biome check --write",
