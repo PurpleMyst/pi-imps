@@ -29,6 +29,7 @@ interface FakeOptions {
   duplicateResult?: boolean;
   busyStarts?: number;
   promptIdentityMismatch?: boolean;
+  malformedTabCreation?: boolean;
   tabPaneCount?: number;
 }
 
@@ -70,7 +71,9 @@ async function setup(options: FakeOptions = {}) {
       return envelope({
         type: "tab_created",
         tab: { tab_id: "w1:t2", workspace_id: "w1", label },
-        root_pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
+        root_pane: options.malformedTabCreation
+          ? { pane_id: "w1:p2", tab_id: "w1:t2" }
+          : { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
       });
     }
     if (args[0] === "agent" && args[1] === "start") {
@@ -190,6 +193,14 @@ describe("GoblinRuntime lifecycle", () => {
     const [claimed] = await runtime.wait("all", [name]);
     expect(claimed?.output).toBe("a\n\nb");
     expect(runtime.has(name)).toBe(false);
+  });
+
+  it("fails a malformed Herdr tab creation response", async () => {
+    const { runtime, prepared } = await setup({ malformedTabCreation: true });
+    const name = runtime.summon(prepared, "/tmp");
+    const [result] = await runtime.wait("all", [name]);
+    expect(result?.status).toBe("failed");
+    expect(result?.error).toContain("Malformed or identity-mismatched Herdr tab creation response");
   });
 
   it("preserves partial output and provider error", async () => {

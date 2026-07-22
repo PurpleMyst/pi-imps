@@ -9,8 +9,11 @@ import {
   herdr,
   PI_INTEGRATION_VERSION,
   Prerequisites,
+  parseAgentInfo,
   parsePiIntegration,
   parseServerStatus,
+  parseTabCreated,
+  parseWorkspaceInfo,
   shouldInvalidatePreflight,
 } from "../src/herdr.js";
 
@@ -48,6 +51,41 @@ describe("Herdr protocol parsing", () => {
       }),
     ).rejects.toMatchObject({ code: "offline", message: "No server" } satisfies Partial<HerdrCommandError>);
     await expect(herdr(["ping"], { runner: async () => ok("not json") })).rejects.toThrow("Invalid JSON response");
+  });
+
+  it("validates wire responses and converts them to camelCase records", () => {
+    expect(parseWorkspaceInfo({ type: "workspace_info", workspace: { workspace_id: "w1" } })).toEqual({
+      workspaceId: "w1",
+    });
+    expect(
+      parseTabCreated({
+        type: "tab_created",
+        tab: { tab_id: "w1:t2", workspace_id: "w1", label: "goblin" },
+        root_pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
+      }),
+    ).toEqual({
+      tab: { tabId: "w1:t2", workspaceId: "w1", label: "goblin" },
+      rootPane: { paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+    });
+    expect(
+      parseAgentInfo({
+        type: "agent_info",
+        agent: { workspace_id: "w1", pane_id: "w1:p2", name: "goblin", agent_status: "working" },
+      }),
+    ).toEqual({ workspaceId: "w1", paneId: "w1:p2", name: "goblin", agentStatus: "working" });
+    expect(
+      parseTabCreated({
+        type: "tab_created",
+        tab: { tab_id: "w1:t2", workspace_id: "w1", label: "goblin" },
+        root_pane: { pane_id: "w1:p2", tab_id: "w1:t2" },
+      }),
+    ).toBeUndefined();
+    expect(
+      parseAgentInfo({
+        type: "agent_info",
+        agent: { workspace_id: "w1", pane_id: "w1:p2", name: "goblin", agent_status: "unexpected" },
+      }),
+    ).toBeUndefined();
   });
 
   it("parses valid server and integration status including a trailing path", () => {

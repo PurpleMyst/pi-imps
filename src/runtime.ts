@@ -7,9 +7,18 @@ import { BridgeServer } from "./bridge.js";
 import { GoblinRecord } from "./goblin-record.js";
 import {
   type CommandRunner,
+  type HerdrAgent,
   HerdrCommandError,
+  type HerdrResponse,
   herdr,
   Prerequisites,
+  parseAgentInfo,
+  parseAgentPrompted,
+  parseAgentStarted,
+  parsePaneInfo,
+  parseTabCreated,
+  parseTabInfo,
+  parseWorkspaceInfo,
   runCommand,
   shouldInvalidatePreflight,
 } from "./herdr.js";
@@ -18,7 +27,6 @@ import type {
   ChildManifest,
   GoblinSettings,
   GoblinSnapshot,
-  HerdrStatus,
   OwnedTab,
   ParentHerdrContext,
   ThinkingLevel,
@@ -90,8 +98,8 @@ function internalAgentName(launchId: string): string {
   return `goblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
 }
 
-function identityMatches(agent: Record<string, unknown>, tab: OwnedTab): boolean {
-  return agent.workspace_id === tab.workspaceId && agent.pane_id === tab.paneId && agent.name === tab.agentName;
+function identityMatches(agent: HerdrAgent, tab: OwnedTab): boolean {
+  return agent.workspaceId === tab.workspaceId && agent.paneId === tab.paneId && agent.name === tab.agentName;
 }
 
 export class GoblinRuntime {
@@ -118,19 +126,16 @@ export class GoblinRuntime {
       this.command(["tab", "get", tabId], undefined, 3_000),
       this.command(["pane", "get", paneId], undefined, 3_000),
     ]);
-    const workspace = workspaceResult.workspace as Record<string, unknown> | undefined;
-    const tab = tabResult.tab as Record<string, unknown> | undefined;
-    const pane = paneResult.pane as Record<string, unknown> | undefined;
+    const workspace = parseWorkspaceInfo(workspaceResult);
+    const tab = parseTabInfo(tabResult);
+    const pane = parsePaneInfo(paneResult);
     if (
-      workspaceResult.type !== "workspace_info" ||
-      workspace?.workspace_id !== workspaceId ||
-      tabResult.type !== "tab_info" ||
-      tab?.tab_id !== tabId ||
-      tab.workspace_id !== workspaceId ||
-      paneResult.type !== "pane_info" ||
-      pane?.pane_id !== paneId ||
-      pane.tab_id !== tabId ||
-      pane.workspace_id !== workspaceId
+      workspace?.workspaceId !== workspaceId ||
+      tab?.tabId !== tabId ||
+      tab.workspaceId !== workspaceId ||
+      pane?.paneId !== paneId ||
+      pane.tabId !== tabId ||
+      pane.workspaceId !== workspaceId
     ) {
       throw new Error("Inherited Herdr workspace, tab, and pane identity mismatch");
     }
@@ -220,7 +225,7 @@ export class GoblinRuntime {
     const remaining = () => deadline - Date.now();
     const label = `pi-goblin-${record.name}-${record.launchId}`;
     const finishTabCreate = record.beginTabCreate();
-    let tabResult: Record<string, unknown>;
+    let tabResult: HerdrResponse;
     try {
       tabResult = await this.command(
         [
@@ -244,23 +249,20 @@ export class GoblinRuntime {
     } finally {
       finishTabCreate();
     }
-    const tabValue = tabResult.tab as Record<string, unknown> | undefined;
-    const rootPane = tabResult.root_pane as Record<string, unknown> | undefined;
+    const created = parseTabCreated(tabResult);
     if (
-      tabResult.type !== "tab_created" ||
-      typeof tabValue?.tab_id !== "string" ||
-      tabValue.workspace_id !== this.options.parent.workspaceId ||
-      tabValue.label !== label ||
-      typeof rootPane?.pane_id !== "string" ||
-      rootPane.tab_id !== tabValue.tab_id ||
-      rootPane.workspace_id !== this.options.parent.workspaceId
+      !created ||
+      created.tab.workspaceId !== this.options.parent.workspaceId ||
+      created.tab.label !== label ||
+      created.rootPane.tabId !== created.tab.tabId ||
+      created.rootPane.workspaceId !== this.options.parent.workspaceId
     ) {
       throw new Error("Malformed or identity-mismatched Herdr tab creation response");
     }
     const tab: OwnedTab = {
       workspaceId: this.options.parent.workspaceId,
-      tabId: tabValue.tab_id,
-      paneId: rootPane.pane_id,
+      tabId: created.tab.tabId,
+      paneId: created.rootPane.paneId,
       label,
       agentName: internalAgentName(record.launchId),
     };
@@ -297,8 +299,8 @@ export class GoblinRuntime {
           record.launchController.signal,
           left,
         );
-        const agent = started.agent as Record<string, unknown> | undefined;
-        if (started.type !== "agent_started" || !agent || !identityMatches(agent, tab)) {
+        const agent = parseAgentStarted(started);
+        if (!agent || !identityMatches(agent, tab)) {
           throw new Error("Herdr agent start identity mismatch");
         }
         break;
@@ -324,8 +326,8 @@ export class GoblinRuntime {
       ["agent", "prompt", tab.agentName, record.task, "--wait", "--until", "idle", "--until", "done"],
       record.launchController.signal,
     );
-    const promptAgent = prompted.agent as Record<string, unknown> | undefined;
-    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, tab)) {
+    const promptAgent = parseAgentPrompted(prompted);
+    if (!promptAgent || !identityMatches(promptAgent, tab)) {
       throw new Error("Herdr prompt response identity mismatch");
     }
     record.acceptPromptSuccess();
@@ -335,7 +337,7 @@ export class GoblinRuntime {
     args: readonly string[],
     signal?: AbortSignal,
     timeout?: number,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<HerdrResponse> {
     try {
       return await herdr(args, { runner: this.runner, signal, ...(timeout === undefined ? {} : { timeout }) });
     } catch (error) {
@@ -438,12 +440,8 @@ export class GoblinRuntime {
   private async refresh(record: GoblinRecord): Promise<void> {
     await record.refresh(REFRESH_CACHE_MS, async (tab) => {
       try {
-        const result = await this.command(["agent", "get", tab.agentName]);
-        const agent = result.agent as Record<string, unknown> | undefined;
-        if (result.type !== "agent_info" || !agent || !identityMatches(agent, tab)) return undefined;
-        if (["idle", "working", "blocked", "done", "unknown"].includes(String(agent.agent_status))) {
-          return agent.agent_status as HerdrStatus;
-        }
+        const agent = parseAgentInfo(await this.command(["agent", "get", tab.agentName]));
+        if (agent && identityMatches(agent, tab)) return agent.agentStatus;
       } catch {
         // Display-only refresh never settles a goblin.
       }
@@ -465,20 +463,15 @@ export class GoblinRuntime {
       const tab = record.getTab();
       if (tab) {
         try {
-          const paneResult = await this.command(["pane", "get", tab.paneId], undefined, 3_000);
-          const paneValue = paneResult.pane as Record<string, unknown> | undefined;
+          const pane = parsePaneInfo(await this.command(["pane", "get", tab.paneId], undefined, 3_000));
           const paneOwned =
-            paneResult.type === "pane_info" &&
-            paneValue?.pane_id === tab.paneId &&
-            paneValue.tab_id === tab.tabId &&
-            paneValue.workspace_id === tab.workspaceId;
+            pane?.paneId === tab.paneId && pane.tabId === tab.tabId && pane.workspaceId === tab.workspaceId;
           if (paneOwned) {
             let live = false;
             try {
-              const agentResult = await this.command(["agent", "get", tab.agentName], undefined, 2_000);
-              const agent = agentResult.agent as Record<string, unknown> | undefined;
+              const agent = parseAgentInfo(await this.command(["agent", "get", tab.agentName], undefined, 2_000));
               live = Boolean(
-                agent && identityMatches(agent, tab) && agent.agent_status !== "idle" && agent.agent_status !== "done",
+                agent && identityMatches(agent, tab) && agent.agentStatus !== "idle" && agent.agentStatus !== "done",
               );
             } catch {}
             if (live) {
@@ -494,24 +487,20 @@ export class GoblinRuntime {
               this.command(["pane", "get", tab.paneId], undefined, 3_000),
               this.command(["tab", "get", this.options.parent.tabId], undefined, 3_000),
             ]);
-            const currentTab = currentTabResult.tab as Record<string, unknown> | undefined;
-            const currentPane = currentPaneResult.pane as Record<string, unknown> | undefined;
-            const parentTab = parentTabResult.tab as Record<string, unknown> | undefined;
+            const currentTab = parseTabInfo(currentTabResult);
+            const currentPane = parsePaneInfo(currentPaneResult);
+            const parentTab = parseTabInfo(parentTabResult);
             const parentStillOwned =
-              parentTabResult.type === "tab_info" &&
-              parentTab?.tab_id === this.options.parent.tabId &&
-              parentTab.workspace_id === tab.workspaceId;
+              parentTab?.tabId === this.options.parent.tabId && parentTab.workspaceId === tab.workspaceId;
             const paneStillOwned =
-              currentPaneResult.type === "pane_info" &&
-              currentPane?.pane_id === tab.paneId &&
-              currentPane.tab_id === tab.tabId &&
-              currentPane.workspace_id === tab.workspaceId;
+              currentPane?.paneId === tab.paneId &&
+              currentPane.tabId === tab.tabId &&
+              currentPane.workspaceId === tab.workspaceId;
             const tabStillExclusive =
-              currentTabResult.type === "tab_info" &&
-              currentTab?.tab_id === tab.tabId &&
-              currentTab.workspace_id === tab.workspaceId &&
+              currentTab?.tabId === tab.tabId &&
+              currentTab.workspaceId === tab.workspaceId &&
               currentTab.label === tab.label &&
-              currentTab.pane_count === 1;
+              currentTab.paneCount === 1;
             if (parentStillOwned && paneStillOwned && tabStillExclusive) {
               await this.command(["tab", "close", tab.tabId], undefined, 5_000).catch(() => {});
             } else if (parentStillOwned && paneStillOwned) {

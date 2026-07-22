@@ -1,8 +1,130 @@
 import { spawn } from "node:child_process";
+import { type Static, Type } from "typebox";
+import Schema from "typebox/schema";
+import type { HerdrStatus } from "./types.js";
 
 export const HERDR_VERSION = "0.7.5";
 export const HERDR_PROTOCOL = 17;
 export const PI_INTEGRATION_VERSION = "v6";
+
+const HerdrResponseSchema = Type.Record(Type.String(), Type.Unknown());
+const HerdrEnvelopeSchema = Type.Object({
+  id: Type.Optional(Type.String()),
+  result: Type.Optional(HerdrResponseSchema),
+  error: Type.Optional(
+    Type.Object({
+      code: Type.Optional(Type.String()),
+      message: Type.Optional(Type.String()),
+    }),
+  ),
+});
+const ServerStatusSchema = Type.Object({
+  status: Type.String(),
+  running: Type.Boolean(),
+  version: Type.String(),
+  protocol: Type.Number(),
+  compatible: Type.Boolean(),
+});
+const WorkspaceInfoSchema = Type.Object({
+  type: Type.Literal("workspace_info"),
+  workspace: Type.Object({ workspace_id: Type.String() }),
+});
+const TabInfoSchema = Type.Object({
+  type: Type.Literal("tab_info"),
+  tab: Type.Object({
+    tab_id: Type.String(),
+    workspace_id: Type.String(),
+    label: Type.Optional(Type.String()),
+    pane_count: Type.Optional(Type.Number()),
+  }),
+});
+const PaneInfoSchema = Type.Object({
+  type: Type.Literal("pane_info"),
+  pane: Type.Object({
+    pane_id: Type.String(),
+    tab_id: Type.String(),
+    workspace_id: Type.String(),
+  }),
+});
+const TabCreatedSchema = Type.Object({
+  type: Type.Literal("tab_created"),
+  tab: Type.Object({
+    tab_id: Type.String(),
+    workspace_id: Type.String(),
+    label: Type.String(),
+  }),
+  root_pane: Type.Object({
+    pane_id: Type.String(),
+    tab_id: Type.String(),
+    workspace_id: Type.String(),
+  }),
+});
+const AgentSchema = {
+  workspace_id: Type.String(),
+  pane_id: Type.String(),
+  name: Type.String(),
+};
+const AgentStartedSchema = Type.Object({
+  type: Type.Literal("agent_started"),
+  agent: Type.Object(AgentSchema),
+});
+const AgentPromptedSchema = Type.Object({
+  type: Type.Literal("agent_prompted"),
+  agent: Type.Object(AgentSchema),
+});
+const AgentInfoSchema = Type.Object({
+  type: Type.Literal("agent_info"),
+  agent: Type.Object({
+    ...AgentSchema,
+    agent_status: Type.Union([
+      Type.Literal("idle"),
+      Type.Literal("working"),
+      Type.Literal("blocked"),
+      Type.Literal("done"),
+      Type.Literal("unknown"),
+    ]),
+  }),
+});
+
+const herdrEnvelope = Schema.Compile(HerdrEnvelopeSchema);
+const serverStatus = Schema.Compile(ServerStatusSchema);
+const workspaceInfo = Schema.Compile(WorkspaceInfoSchema);
+const tabInfo = Schema.Compile(TabInfoSchema);
+const paneInfo = Schema.Compile(PaneInfoSchema);
+const tabCreated = Schema.Compile(TabCreatedSchema);
+const agentStarted = Schema.Compile(AgentStartedSchema);
+const agentPrompted = Schema.Compile(AgentPromptedSchema);
+const agentInfo = Schema.Compile(AgentInfoSchema);
+
+export type HerdrResponse = Static<typeof HerdrResponseSchema>;
+
+export interface HerdrWorkspace {
+  readonly workspaceId: string;
+}
+
+export interface HerdrTab {
+  readonly tabId: string;
+  readonly workspaceId: string;
+  readonly label?: string;
+  readonly paneCount?: number;
+}
+
+export interface HerdrPane {
+  readonly paneId: string;
+  readonly tabId: string;
+  readonly workspaceId: string;
+}
+
+export interface HerdrAgent {
+  readonly workspaceId: string;
+  readonly paneId: string;
+  readonly name: string;
+}
+
+export interface HerdrCreatedTab {
+  readonly tab: HerdrTab & { readonly label: string };
+  readonly rootPane: HerdrPane;
+}
 
 export interface CommandResult {
   readonly stdout: string;
@@ -38,12 +160,6 @@ export const runCommand: CommandRunner = (command, args, options = {}) =>
     });
   });
 
-export interface HerdrEnvelope {
-  readonly id?: string;
-  readonly result?: Record<string, unknown>;
-  readonly error?: { readonly code?: string; readonly message?: string };
-}
-
 export class HerdrCommandError extends Error {
   constructor(
     readonly code: string,
@@ -64,15 +180,16 @@ function parseJson(text: string): unknown {
 export async function herdr(
   args: readonly string[],
   options: { signal?: AbortSignal; timeout?: number; runner?: CommandRunner } = {},
-): Promise<Record<string, unknown>> {
+): Promise<HerdrResponse> {
   const result = await (options.runner ?? runCommand)("herdr", args, options);
-  const envelope = parseJson(result.code === 0 ? result.stdout : result.stderr || result.stdout) as HerdrEnvelope;
-  if (result.code !== 0 || envelope.error) {
-    const code = envelope.error?.code ?? `exit_${result.code}`;
-    throw new HerdrCommandError(code, envelope.error?.message ?? `herdr ${args.join(" ")} failed`);
+  const value = parseJson(result.code === 0 ? result.stdout : result.stderr || result.stdout);
+  if (!herdrEnvelope.Check(value)) throw new Error("Malformed Herdr response envelope");
+  if (result.code !== 0 || value.error) {
+    const code = value.error?.code ?? `exit_${result.code}`;
+    throw new HerdrCommandError(code, value.error?.message ?? `herdr ${args.join(" ")} failed`);
   }
-  if (!envelope.result || typeof envelope.result !== "object") throw new Error("Herdr response has no result object");
-  return envelope.result;
+  if (!value.result) throw new Error("Herdr response has no result object");
+  return value.result;
 }
 
 export interface ServerStatus {
@@ -84,17 +201,80 @@ export interface ServerStatus {
 }
 
 export function parseServerStatus(text: string): ServerStatus {
-  const value = parseJson(text) as Partial<ServerStatus>;
-  if (
-    typeof value.status !== "string" ||
-    typeof value.running !== "boolean" ||
-    typeof value.version !== "string" ||
-    typeof value.protocol !== "number" ||
-    typeof value.compatible !== "boolean"
-  ) {
-    throw new Error("Malformed Herdr server status");
-  }
-  return value as ServerStatus;
+  const value = parseJson(text);
+  if (!serverStatus.Check(value)) throw new Error("Malformed Herdr server status");
+  return {
+    status: value.status,
+    running: value.running,
+    version: value.version,
+    protocol: value.protocol,
+    compatible: value.compatible,
+  };
+}
+
+export function parseWorkspaceInfo(response: HerdrResponse): HerdrWorkspace | undefined {
+  if (!workspaceInfo.Check(response)) return undefined;
+  return { workspaceId: response.workspace.workspace_id };
+}
+
+export function parseTabInfo(response: HerdrResponse): HerdrTab | undefined {
+  if (!tabInfo.Check(response)) return undefined;
+  return {
+    tabId: response.tab.tab_id,
+    workspaceId: response.tab.workspace_id,
+    ...(response.tab.label === undefined ? {} : { label: response.tab.label }),
+    ...(response.tab.pane_count === undefined ? {} : { paneCount: response.tab.pane_count }),
+  };
+}
+
+export function parsePaneInfo(response: HerdrResponse): HerdrPane | undefined {
+  if (!paneInfo.Check(response)) return undefined;
+  return {
+    paneId: response.pane.pane_id,
+    tabId: response.pane.tab_id,
+    workspaceId: response.pane.workspace_id,
+  };
+}
+
+export function parseTabCreated(response: HerdrResponse): HerdrCreatedTab | undefined {
+  if (!tabCreated.Check(response)) return undefined;
+  return {
+    tab: {
+      tabId: response.tab.tab_id,
+      workspaceId: response.tab.workspace_id,
+      label: response.tab.label,
+    },
+    rootPane: {
+      paneId: response.root_pane.pane_id,
+      tabId: response.root_pane.tab_id,
+      workspaceId: response.root_pane.workspace_id,
+    },
+  };
+}
+
+function parsedAgent(response: {
+  readonly agent: { readonly workspace_id: string; readonly pane_id: string; readonly name: string };
+}): HerdrAgent {
+  return {
+    workspaceId: response.agent.workspace_id,
+    paneId: response.agent.pane_id,
+    name: response.agent.name,
+  };
+}
+
+export function parseAgentStarted(response: HerdrResponse): HerdrAgent | undefined {
+  return agentStarted.Check(response) ? parsedAgent(response) : undefined;
+}
+
+export function parseAgentPrompted(response: HerdrResponse): HerdrAgent | undefined {
+  return agentPrompted.Check(response) ? parsedAgent(response) : undefined;
+}
+
+export function parseAgentInfo(
+  response: HerdrResponse,
+): (HerdrAgent & { readonly agentStatus: HerdrStatus }) | undefined {
+  if (!agentInfo.Check(response)) return undefined;
+  return { ...parsedAgent(response), agentStatus: response.agent.agent_status };
 }
 
 export function parsePiIntegration(text: string): { state: string; version?: string } {
