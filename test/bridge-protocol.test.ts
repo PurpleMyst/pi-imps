@@ -27,6 +27,9 @@ describe("bridge protocol schemas", () => {
   it("accepts only the minimal manifest", () => {
     const manifest = { socketPath: "/tmp/g/bridge.sock", turnLimit: 30 };
     expect(parseChildManifest(manifest)).toEqual(manifest);
-    expect(() => parseChildManifest({ ...manifest, turnLimit: -1 })).toThrow("Invalid child manifest");
+    expect(() => parseChildManifest({ ...manifest, turnLimit: 1 })).toThrow("Invalid child manifest");
+    expect(() => parseChildManifest({ ...manifest, turnLimit: Number.MAX_SAFE_INTEGER + 1 })).toThrow(
+      "Invalid child manifest",
+    );
   });
 });

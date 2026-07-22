@@ -18,7 +18,7 @@ The parent workspace is borrowed and is never closed. Recovery after a hard pare
 
 ## Public behavior
 
-`summon` validates the task, model policy, tool selection, and runtime paths before allocating a name. It then returns without waiting for launch or completion. Operational Herdr failures become stored failed results.
+`summon` atomically rejects admission after shutdown begins, validates the task, model policy, tool selection, and runtime paths, then allocates and registers a name. It returns without waiting for launch or completion. Operational Herdr failures become stored failed results.
 
 `wait` collects immutable snapshots in `all` or `first` mode. Concurrent callers claim synchronously, so a goblin can be collected only once. An aborted wait claims nothing. `dismiss` claims and cleans running or terminal uncollected goblins. Names remain reserved until collection or dismissal.
 
@@ -96,7 +96,7 @@ abort active commands
 → remove the runtime directory
 ```
 
-Cleanup does not reconstruct pane layouts, send escape, wait for idle, or use pane-level fallbacks. Cooperative shutdown dismisses all records and waits behind a 65-second barrier. It never stops the Herdr server.
+Command cancellation sends SIGTERM, escalates to SIGKILL after one second, and settles after a second hard-stop grace period. Cleanup does not reconstruct pane layouts, send escape, wait for idle, or use pane-level fallbacks. Cooperative shutdown dismisses all records and waits behind a 65-second barrier. It never stops the Herdr server.
 
 ## Model and tool selection
 

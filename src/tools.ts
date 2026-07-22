@@ -44,15 +44,17 @@ export function summonTool(
     parameters: SummonParams,
     async execute(_id, params, _signal, _update, ctx) {
       try {
-        const prepared = await runtime.prepare({
-          task: params.task,
-          requestedModel: params.model,
-          thinking: params.thinking ?? getThinking(),
-          trusted: ctx.isProjectTrusted(),
-          parentModel: ctx.model,
-          modelRegistry: ctx.modelRegistry,
-        });
-        const name = runtime.summon(prepared, ctx.cwd);
+        const name = runtime.summon(
+          {
+            task: params.task,
+            requestedModel: params.model,
+            thinking: params.thinking ?? getThinking(),
+            trusted: ctx.isProjectTrusted(),
+            parentModel: ctx.model,
+            modelRegistry: ctx.modelRegistry,
+          },
+          ctx.cwd,
+        );
         return {
           content: [{ type: "text", text: JSON.stringify({ name }) }],
           details: { name },

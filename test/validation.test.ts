@@ -25,6 +25,8 @@ describe("settings policy", () => {
       toolAllowlist: [],
       modelPatterns: [],
     });
+    expect(parseGoblinSettings({ turnLimit: 1 })).toEqual(defaults);
+    expect(parseGoblinSettings({ turnLimit: Number.MAX_SAFE_INTEGER + 1 })).toEqual(defaults);
   });
 
   it("fails closed for malformed policy arrays", () => {

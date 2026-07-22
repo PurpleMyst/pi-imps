@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import type { GoblinRuntime, PrepareOptions } from "../src/runtime.js";
+import type { GoblinRuntime } from "../src/runtime.js";
 import { dismissTool, listGoblinsTool, summonTool } from "../src/tools.js";
 import type { GoblinSnapshot } from "../src/types.js";
 
@@ -16,29 +16,24 @@ function text(result: { content: Array<{ type: string; text?: string }> }): unkn
 }
 
 describe("summonTool", () => {
-  it("passes the parent context through preparation and returns the allocated name", async () => {
-    const prepared = { task: "perform a detailed task" };
-    const prepare = vi.fn(async (_options: PrepareOptions) => prepared);
+  it("passes the parent context through atomic admission and returns the allocated name", async () => {
+    const task = "perform a detailed task";
     const summon = vi.fn(() => "brindle");
-    const runtime = { prepare, summon } as unknown as GoblinRuntime;
+    const runtime = { summon } as unknown as GoblinRuntime;
 
-    const result = await summonTool(runtime, () => "medium").execute(
-      "call",
-      { task: prepared.task },
-      undefined,
-      undefined,
-      context,
+    const result = await summonTool(runtime, () => "medium").execute("call", { task }, undefined, undefined, context);
+
+    expect(summon).toHaveBeenCalledWith(
+      {
+        task,
+        requestedModel: undefined,
+        thinking: "medium",
+        trusted: true,
+        parentModel: context.model,
+        modelRegistry: context.modelRegistry,
+      },
+      "/work",
     );
-
-    expect(prepare).toHaveBeenCalledWith({
-      task: prepared.task,
-      requestedModel: undefined,
-      thinking: "medium",
-      trusted: true,
-      parentModel: context.model,
-      modelRegistry: context.modelRegistry,
-    });
-    expect(summon).toHaveBeenCalledWith(prepared, "/work");
     expect(text(result)).toEqual({ name: "brindle" });
     expect(result.details).toEqual({ name: "brindle" });
   });

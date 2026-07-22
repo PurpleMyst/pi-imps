@@ -27,7 +27,7 @@ export function parseGoblinSettings(block: Record<string, unknown> | undefined):
   if (!block || typeof block !== "object") return { ...DEFAULTS };
   return {
     turnLimit:
-      typeof block.turnLimit === "number" && Number.isInteger(block.turnLimit) && block.turnLimit >= 2
+      typeof block.turnLimit === "number" && Number.isSafeInteger(block.turnLimit) && block.turnLimit >= 2
         ? block.turnLimit
         : DEFAULTS.turnLimit,
     toolAllowlist: Object.hasOwn(block, "toolAllowlist")

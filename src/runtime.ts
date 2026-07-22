@@ -34,7 +34,7 @@ const START_BUSY_WINDOW_MS = 5_000;
 const REFRESH_CACHE_MS = 1_000;
 const ABORTED = Symbol("aborted");
 
-interface PreparedLaunch {
+interface LaunchPlan {
   readonly task: string;
   readonly launchId: string;
   readonly runtimeDir: string;
@@ -45,7 +45,7 @@ interface PreparedLaunch {
   readonly tools: string[] | undefined;
 }
 
-export interface PrepareOptions {
+export interface SummonOptions {
   readonly task: string;
   readonly requestedModel?: string;
   readonly thinking: ThinkingLevel;
@@ -105,7 +105,20 @@ export class GoblinRuntime {
       options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${randomUUID().slice(0, 8)}`);
   }
 
-  async prepare(options: PrepareOptions): Promise<PreparedLaunch> {
+  summon(options: SummonOptions, cwd: string): string {
+    if (this.shutdownPromise) throw new Error("Cannot summon after shutdown has begun");
+    const prepared = this.prepare(options);
+    const name = this.names.allocate();
+    const lifecycle = new GoblinLifecycle(name, prepared.task, prepared.runtimeDir, prepared.socketPath, (terminal) =>
+      this.cleanup.schedule(terminal),
+    );
+    const { record } = lifecycle;
+    this.goblins.set(name, lifecycle);
+    lifecycle.setLaunchPromise(this.launch(lifecycle, prepared, cwd).catch((error) => record.fail(error)));
+    return name;
+  }
+
+  private prepare(options: SummonOptions): LaunchPlan {
     validateTask(options.task);
     const launchId = randomUUID();
     const runtimeDir = join(this.runtimeRoot, launchId);
@@ -117,7 +130,6 @@ export class GoblinRuntime {
       options.modelRegistry.getAvailable(),
       this.options.settings.modelPatterns,
     );
-    const tools = resolveTools(this.options.settings);
     return {
       task: options.task,
       launchId,
@@ -126,19 +138,8 @@ export class GoblinRuntime {
       canonicalModel: canonical,
       thinking: options.thinking,
       trusted: options.trusted,
-      tools,
+      tools: resolveTools(this.options.settings),
     };
-  }
-
-  summon(prepared: PreparedLaunch, cwd: string): string {
-    const name = this.names.allocate();
-    const lifecycle = new GoblinLifecycle(name, prepared.task, prepared.runtimeDir, prepared.socketPath, (terminal) =>
-      this.cleanup.schedule(terminal),
-    );
-    const { record } = lifecycle;
-    this.goblins.set(name, lifecycle);
-    lifecycle.setLaunchPromise(this.launch(lifecycle, prepared, cwd).catch((error) => record.fail(error)));
-    return name;
   }
 
   private createBridge(manifest: ChildManifest, lifecycle: GoblinLifecycle): BridgeServer {
@@ -155,7 +156,7 @@ export class GoblinRuntime {
     });
   }
 
-  private async launch(lifecycle: GoblinLifecycle, prepared: PreparedLaunch, cwd: string): Promise<void> {
+  private async launch(lifecycle: GoblinLifecycle, prepared: LaunchPlan, cwd: string): Promise<void> {
     const { record } = lifecycle;
     const deadline = Date.now() + LAUNCH_DEADLINE_MS;
     const manifest: ChildManifest = {

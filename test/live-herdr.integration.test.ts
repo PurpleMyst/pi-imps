@@ -55,15 +55,17 @@ async function makeRuntime(toolAllowlist: string[] | undefined): Promise<{ runti
 
 async function summon(runtime: GoblinRuntime, root: string, task: string): Promise<LiveGoblin> {
   const model = liveModel();
-  const prepared = await runtime.prepare({
-    task,
-    requestedModel: MODEL_ID,
-    thinking: "off",
-    trusted: true,
-    parentModel: model,
-    modelRegistry: { getAvailable: () => [model] } as ModelRegistry,
-  });
-  const name = runtime.summon(prepared, root);
+  const name = runtime.summon(
+    {
+      task,
+      requestedModel: MODEL_ID,
+      thinking: "off",
+      trusted: true,
+      parentModel: model,
+      modelRegistry: { getAvailable: () => [model] } as ModelRegistry,
+    },
+    root,
+  );
   await waitUntil(async () => Boolean(await tabForGoblin(name)), 65_000, "Herdr tab creation");
   const tab = await tabForGoblin(name);
   if (!tab) throw new Error("Goblin did not create an identifiable Herdr tab");

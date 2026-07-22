@@ -39,7 +39,7 @@ export const ChildEventSchema = Type.Union([
 export const ChildManifestSchema = Type.Object(
   {
     socketPath: Type.String(),
-    turnLimit: NonnegativeInteger,
+    turnLimit: Type.Integer({ minimum: 2, maximum: Number.MAX_SAFE_INTEGER }),
   },
   { additionalProperties: false },
 );

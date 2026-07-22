@@ -9,6 +9,7 @@ import {
   parseAgentStatus,
   parseTabCreated,
   parseTabInfo,
+  runCommand,
 } from "../src/herdr.js";
 
 const result = (stdout: string, code = 0, stderr = "") => ({ stdout, stderr, code });
@@ -29,6 +30,17 @@ describe("Herdr adapters", () => {
     await expect(herdrVersion(async () => result("herdr 0.7.5\n"))).resolves.toBe("0.7.5");
     await expect(herdrVersion(async () => result("", 1))).resolves.toBeUndefined();
   });
+
+  it("kills commands that ignore graceful timeout termination", async () => {
+    const started = Date.now();
+    await expect(
+      runCommand(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], {
+        timeout: 200,
+      }),
+    ).rejects.toThrow("command timed out");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(Date.now() - started).toBeLessThan(2_500);
+  }, 4_000);
 
   it("parses tab create/get responses", () => {
     expect(

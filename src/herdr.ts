@@ -71,25 +71,50 @@ export type CommandRunner = (
   options?: { signal?: AbortSignal; timeout?: number },
 ) => Promise<CommandResult>;
 
+const TERMINATION_GRACE_MS = 1_000;
+
 export const runCommand: CommandRunner = (command, args, options = {}) =>
   new Promise((resolve, reject) => {
     if (options.signal?.aborted) return reject(new Error(`${command} command aborted`));
     const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const abort = () => child.kill("SIGTERM");
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    let termination: "aborted" | "timed out" | undefined;
+    let settled = false;
+
+    const finish = (error?: Error, result?: CommandResult) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (settleTimer) clearTimeout(settleTimer);
+      options.signal?.removeEventListener("abort", abort);
+      if (error) reject(error);
+      else if (result) resolve(result);
+    };
+    const terminate = (reason: "aborted" | "timed out") => {
+      if (termination) return;
+      termination = reason;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        settleTimer = setTimeout(() => finish(new Error(`${command} command ${reason}`)), TERMINATION_GRACE_MS);
+      }, TERMINATION_GRACE_MS);
+    };
+    const abort = () => terminate("aborted");
+
     options.signal?.addEventListener("abort", abort, { once: true });
-    if (options.timeout !== undefined) timer = setTimeout(abort, options.timeout);
+    if (options.timeout !== undefined) timeoutTimer = setTimeout(() => terminate("timed out"), options.timeout);
     child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
-    child.on("error", reject);
+    child.on("error", (error) => finish(error));
     child.on("close", (code, signal) => {
-      if (timer) clearTimeout(timer);
-      options.signal?.removeEventListener("abort", abort);
-      if (options.signal?.aborted) return reject(new Error(`${command} command aborted`));
-      if (signal && code === null) return reject(new Error(`${command} command terminated by ${signal}`));
-      resolve({ stdout, stderr, code: code ?? 1 });
+      if (termination) return finish(new Error(`${command} command ${termination}`));
+      if (signal && code === null) return finish(new Error(`${command} command terminated by ${signal}`));
+      finish(undefined, { stdout, stderr, code: code ?? 1 });
     });
   });
 

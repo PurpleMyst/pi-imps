@@ -13,6 +13,7 @@
     "turnLimit": {
       "type": "integer",
       "minimum": 2,
+      "maximum": 9007199254740991,
       "default": 30,
       "description": "Maximum assistant turns before the child bridge publishes a truncated result."
     },

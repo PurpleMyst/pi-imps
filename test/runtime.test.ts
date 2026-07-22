@@ -173,15 +173,14 @@ async function setup(options: FakeOptions = {}) {
   });
   const parent = model();
   const registry = { getAvailable: () => [parent] } as ModelRegistry;
-  const prepare = (task = "perform a sufficiently detailed task") =>
-    runtime.prepare({
-      task,
-      thinking: "medium",
-      trusted: true,
-      parentModel: parent,
-      modelRegistry: registry,
-    });
-  const prepared = await prepare();
+  const prepare = (task = "perform a sufficiently detailed task") => ({
+    task,
+    thinking: "medium" as const,
+    trusted: true,
+    parentModel: parent,
+    modelRegistry: registry,
+  });
+  const prepared = prepare();
   return { runtime, prepared, prepare, calls, wasRefreshAborted: () => refreshAborted };
 }
 
@@ -372,6 +371,12 @@ describe("GoblinRuntime lifecycle", () => {
     await shutdown;
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  it("rejects new goblins once shutdown has begun", async () => {
+    const { runtime, prepared } = await setup();
+    await runtime.shutdown();
+    expect(() => runtime.summon(prepared, "/tmp")).toThrow("Cannot summon after shutdown has begun");
+  });
 });
 
 describe("wait collection races", () => {
@@ -414,7 +419,7 @@ describe("wait collection races", () => {
     await terminalSnapshot(runtime, otherName);
     await waitUntil(() => calls.some((call) => call[1] === "tab" && call[2] === "close"));
 
-    const requestedName = runtime.summon(await prepare("perform a second sufficiently detailed task"), "/tmp");
+    const requestedName = runtime.summon(prepare("perform a second sufficiently detailed task"), "/tmp");
     const result = await waitTool(runtime).execute(
       "filtered",
       { mode: "all", names: [requestedName] },
