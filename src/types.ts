@@ -53,24 +53,22 @@ export interface ChildManifest {
   readonly turnLimit: number;
 }
 
-export interface BridgeReady {
-  readonly type: "ready";
-  readonly protocol: 1;
+interface BridgeIdentity {
   readonly ownerId: string;
   readonly launchId: string;
-  readonly nonce: string;
-  readonly version: string;
 }
 
-export type BridgeMessage =
-  | BridgeReady
-  | { readonly type: "tool"; readonly ownerId: string; readonly launchId: string; readonly preview: string }
+export type BridgePayload =
+  | { readonly type: "ready"; readonly protocol: 1; readonly nonce: string; readonly version: string }
+  | { readonly type: "tool"; readonly preview: string }
   | {
       readonly type: "turn";
-      readonly ownerId: string;
-      readonly launchId: string;
       readonly turns: number;
       readonly tokens: { readonly input: number; readonly output: number };
     }
-  | ({ readonly type: "result"; readonly ownerId: string; readonly launchId: string } & TerminalResult)
-  | { readonly type: "error"; readonly ownerId: string; readonly launchId: string; readonly error: string };
+  | ({ readonly type: "result" } & TerminalResult)
+  | { readonly type: "error"; readonly error: string };
+
+type WithIdentity<Payload> = Payload extends BridgePayload ? Payload & BridgeIdentity : never;
+
+export type BridgeMessage = WithIdentity<BridgePayload>;

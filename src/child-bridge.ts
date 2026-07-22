@@ -3,7 +3,7 @@ import { Socket } from "node:net";
 import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, getPackageDir } from "@earendil-works/pi-coding-agent";
-import type { BridgeMessage, ChildManifest, TerminalResult } from "./types.js";
+import type { BridgeMessage, BridgePayload, ChildManifest, TerminalResult } from "./types.js";
 
 const FINAL_TURN_DIRECTIVE =
   "FINAL TURN. Do not start new work. Save any pending changes, commit your progress, and respond with: (1) what you completed, (2) what remains unfinished.";
@@ -47,8 +47,8 @@ export default function childBridge(pi: ExtensionAPI): void {
   const tokens = { input: 0, output: 0 };
   let latest: AssistantMessage | undefined;
 
-  function send(payload: Record<string, unknown> & { type: BridgeMessage["type"] }): Promise<void> {
-    const message = { ...payload, ownerId: manifest.ownerId, launchId: manifest.launchId } as BridgeMessage;
+  function send(payload: BridgePayload): Promise<void> {
+    const message: BridgeMessage = { ...payload, ownerId: manifest.ownerId, launchId: manifest.launchId };
     writes = writes.then(
       () =>
         new Promise<void>((resolve, reject) => {
