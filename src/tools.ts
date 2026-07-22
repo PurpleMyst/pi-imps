@@ -100,7 +100,6 @@ const WaitParams = Type.Object({
   names: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 
-
 export function waitTool(
   runtime: GoblinRuntime,
 ): ToolDefinition<typeof WaitParams, { goblins: GoblinSnapshot[] }, { animationFrame: number }> {

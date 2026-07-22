@@ -189,10 +189,7 @@ export class GoblinRecord {
     await bridge?.close();
   }
 
-  refresh(
-    cacheMs: number,
-    run: (tab: OwnedTab) => Promise<HerdrStatus | undefined>,
-  ): Promise<void> | undefined {
+  refresh(cacheMs: number, run: (tab: OwnedTab) => Promise<HerdrStatus | undefined>): Promise<void> | undefined {
     if (!this.tab || !this.isRunning()) return undefined;
     if (this.refreshedAt && Date.now() - this.refreshedAt < cacheMs) return undefined;
     if (this.refreshPromise) return this.refreshPromise;

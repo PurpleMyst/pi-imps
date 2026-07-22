@@ -37,7 +37,6 @@ export interface OwnedTab {
   readonly agentName: string;
 }
 
-
 export interface GoblinSettings {
   readonly turnLimit: number;
   readonly toolAllowlist: string[] | undefined;

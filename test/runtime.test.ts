@@ -370,10 +370,7 @@ describe("wait collection races", () => {
     await terminalSnapshot(runtime, otherName);
     await waitUntil(() => calls.some((call) => call[1] === "tab" && call[2] === "close"));
 
-    const requestedName = runtime.summon(
-      await prepare("perform a second sufficiently detailed task"),
-      "/tmp",
-    );
+    const requestedName = runtime.summon(await prepare("perform a second sufficiently detailed task"), "/tmp");
     const result = await waitTool(runtime).execute(
       "filtered",
       { mode: "all", names: [requestedName] },
@@ -382,9 +379,7 @@ describe("wait collection races", () => {
       {} as ExtensionContext,
     );
 
-    expect(parseText(result)).toEqual([
-      { name: requestedName, status: "completed", output: "filtered" },
-    ]);
+    expect(parseText(result)).toEqual([{ name: requestedName, status: "completed", output: "filtered" }]);
     expect(runtime.has(requestedName)).toBe(false);
     expect(runtime.has(otherName)).toBe(true);
     runtime.dismiss("all");

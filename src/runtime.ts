@@ -333,11 +333,7 @@ export class GoblinRuntime {
     record.acceptPromptSuccess();
   }
 
-  private async command(
-    args: readonly string[],
-    signal?: AbortSignal,
-    timeout?: number,
-  ): Promise<HerdrResponse> {
+  private async command(args: readonly string[], signal?: AbortSignal, timeout?: number): Promise<HerdrResponse> {
     try {
       return await herdr(args, { runner: this.runner, signal, ...(timeout === undefined ? {} : { timeout }) });
     } catch (error) {
@@ -366,11 +362,7 @@ export class GoblinRuntime {
     return this.eligible(names ? new Set(names) : undefined).map((record) => record.snapshot());
   }
 
-  async wait(
-    mode: "all" | "first",
-    names?: readonly string[],
-    signal?: AbortSignal,
-  ): Promise<GoblinSnapshot[]> {
+  async wait(mode: "all" | "first", names?: readonly string[], signal?: AbortSignal): Promise<GoblinSnapshot[]> {
     const filter = names ? new Set(names) : undefined;
     let waiting = this.eligible(filter);
     if (waiting.length === 0) return [];
