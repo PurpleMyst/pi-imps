@@ -6,7 +6,7 @@ export type ResultStatus = "completed" | "failed" | "truncated";
 export type GoblinStatus = "running" | ResultStatus | "dismissed";
 export type HerdrStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type { BridgeMessage, BridgePayload, ChildManifest, TerminalResult } from "./bridge-protocol.js";
+export type { ChildEvent, ChildManifest, TerminalResult } from "./bridge-protocol.js";
 
 export interface GoblinSnapshot {
   readonly name: string;

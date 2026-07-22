@@ -1,16 +1,16 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { TextDecoder } from "node:util";
-import { parseBridgeMessage } from "./bridge-protocol.js";
-import type { BridgeMessage, ChildManifest, TerminalResult } from "./types.js";
-import { isSupportedPiVersion, validateRuntimePaths } from "./validation.js";
+import { parseChildEvent } from "./bridge-protocol.js";
+import type { ChildEvent, ChildManifest, TerminalResult } from "./types.js";
+import { validateRuntimePaths } from "./validation.js";
 
 export const TELEMETRY_LIMIT = 64 * 1024;
 export const RESULT_LIMIT = 16 * 1024 * 1024;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface BridgeHandlers {
-  readonly onReady: (version: string) => void;
+  readonly onConnect: () => void;
   readonly onTool: (preview: string) => void;
   readonly onTurn: (turns: number, tokens: { input: number; output: number }) => void;
   readonly onResult: (result: TerminalResult) => void;
@@ -20,9 +20,8 @@ export interface BridgeHandlers {
 export class BridgeServer {
   private server?: Server;
   private socket?: Socket;
-  private readonly candidates = new Set<Socket>();
-  private ready = false;
   private resultAccepted = false;
+  private streamFailed = false;
   private closing = false;
   private turns = 0;
   private tokens = { input: 0, output: 0 };
@@ -60,115 +59,94 @@ export class BridgeServer {
       socket.destroy();
       return;
     }
-    this.candidates.add(socket);
+    this.socket = socket;
+    this.handlers.onConnect();
     let buffered = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
       buffered = Buffer.concat([buffered, chunk]);
       for (;;) {
         const newline = buffered.indexOf(0x0a);
         if (newline < 0) {
-          if (buffered.length > RESULT_LIMIT) this.protocolError(socket, "Bridge message exceeds 16 MiB");
+          if (buffered.length > RESULT_LIMIT) this.protocolError("Bridge message exceeds 16 MiB");
           break;
         }
         if (newline > RESULT_LIMIT) {
-          this.protocolError(socket, "Bridge message exceeds 16 MiB");
+          this.protocolError("Bridge message exceeds 16 MiB");
           break;
         }
         const line = buffered.subarray(0, newline);
         buffered = buffered.subarray(newline + 1);
-        this.receive(socket, line);
+        this.receive(line);
         if (socket.destroyed) break;
       }
     });
     socket.on("error", (error) => {
-      if (socket === this.socket && !this.closing) this.handlers.onError(error);
+      if (!this.closing && !this.resultAccepted && !this.streamFailed) {
+        this.streamFailed = true;
+        this.handlers.onError(error);
+      }
     });
     socket.on("close", () => {
-      this.candidates.delete(socket);
-      if (socket === this.socket && !this.closing)
-        this.handlers.onError(new Error("Authenticated bridge disconnected"));
+      if (!this.closing && !this.resultAccepted && !this.streamFailed) {
+        this.streamFailed = true;
+        this.handlers.onError(new Error("Bridge disconnected before result"));
+      }
     });
   }
 
-  private receive(socket: Socket, line: Buffer): void {
-    let message: BridgeMessage;
+  private receive(line: Buffer): void {
     try {
-      const text = decoder.decode(line);
-      message = parseBridgeMessage(JSON.parse(text));
-      const limit = message.type === "result" ? RESULT_LIMIT : TELEMETRY_LIMIT;
-      if (line.length > limit) throw new Error(`Bridge ${message.type} message exceeds its size limit`);
-      this.validateIdentity(message);
-      if (!this.socket && message.type !== "ready") throw new Error("The first bridge message must be ready");
-      if (this.socket && socket !== this.socket)
-        throw new Error("Message came from an unauthenticated bridge connection");
-      switch (message.type) {
-        case "ready":
-          if (this.ready) throw new Error("Duplicate bridge ready message");
-          if (!isSupportedPiVersion(message.version)) {
-            this.protocolError(socket, `Unsupported child protocol or Pi version ${message.version}`, true);
-            return;
-          }
-          this.ready = true;
-          this.socket = socket;
-          for (const candidate of this.candidates) if (candidate !== socket) candidate.destroy();
-          this.candidates.clear();
-          this.handlers.onReady(message.version);
-          break;
-        case "tool":
-          if (Buffer.byteLength(message.preview) > 512) {
-            throw new Error("Invalid tool preview");
-          }
-          this.handlers.onTool(message.preview);
-          break;
-        case "turn":
-          if (
-            message.turns < this.turns ||
-            message.tokens.input < this.tokens.input ||
-            message.tokens.output < this.tokens.output
-          ) {
-            throw new Error("Invalid or decreasing bridge counters");
-          }
-          this.turns = message.turns;
-          this.tokens = { ...message.tokens };
-          this.handlers.onTurn(message.turns, message.tokens);
-          break;
-        case "result": {
-          if (this.resultAccepted) throw new Error("Duplicate bridge result message");
-          this.resultAccepted = true;
-          const result: TerminalResult =
-            message.status === "failed"
-              ? { status: message.status, output: message.output, error: message.error }
-              : { status: message.status, output: message.output };
-          this.handlers.onResult(Object.freeze(result));
-          break;
-        }
-        case "error":
-          this.handlers.onError(new Error(message.error));
-          break;
-      }
+      const event = parseChildEvent(JSON.parse(decoder.decode(line)));
+      const limit = event.type === "result" ? RESULT_LIMIT : TELEMETRY_LIMIT;
+      if (line.length > limit) throw new Error(`Bridge ${event.type} message exceeds its size limit`);
+      this.handle(event);
     } catch (error) {
-      this.protocolError(socket, error instanceof Error ? error.message : String(error));
+      this.protocolError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  private validateIdentity(message: BridgeMessage): void {
-    if (message.ownerId !== this.manifest.ownerId || message.launchId !== this.manifest.launchId) {
-      throw new Error("Bridge identity mismatch");
+  private handle(event: ChildEvent): void {
+    switch (event.type) {
+      case "tool":
+        if (Buffer.byteLength(event.preview) > 512) throw new Error("Invalid tool preview");
+        this.handlers.onTool(event.preview);
+        break;
+      case "turn":
+        if (
+          event.turns < this.turns ||
+          event.tokens.input < this.tokens.input ||
+          event.tokens.output < this.tokens.output
+        ) {
+          throw new Error("Invalid or decreasing bridge counters");
+        }
+        this.turns = event.turns;
+        this.tokens = { ...event.tokens };
+        this.handlers.onTurn(event.turns, event.tokens);
+        break;
+      case "result": {
+        if (this.resultAccepted) throw new Error("Duplicate bridge result event");
+        this.resultAccepted = true;
+        const result: TerminalResult =
+          event.status === "failed"
+            ? { status: event.status, output: event.output, error: event.error }
+            : { status: event.status, output: event.output };
+        this.handlers.onResult(Object.freeze(result));
+        break;
+      }
     }
-    if (message.type === "ready" && message.nonce !== this.manifest.nonce) throw new Error("Bridge nonce mismatch");
   }
 
-  private protocolError(socket: Socket, message: string, report = false): void {
-    const authenticated = socket === this.socket;
-    socket.destroy();
-    if (authenticated || report) this.handlers.onError(new Error(`Bridge protocol error: ${message}`));
+  private protocolError(message: string): void {
+    this.socket?.destroy();
+    if (!this.resultAccepted && !this.streamFailed) {
+      this.streamFailed = true;
+      this.handlers.onError(new Error(`Bridge protocol error: ${message}`));
+    }
   }
 
   async close(): Promise<void> {
     this.closing = true;
     this.socket?.destroy();
-    for (const candidate of this.candidates) candidate.destroy();
-    this.candidates.clear();
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());

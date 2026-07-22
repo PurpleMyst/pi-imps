@@ -1,10 +1,9 @@
 import { readFileSync } from "node:fs";
 import { Socket } from "node:net";
-import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, getPackageDir } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseChildManifest } from "./bridge-protocol.js";
-import type { BridgeMessage, BridgePayload, TerminalResult } from "./types.js";
+import type { ChildEvent, TerminalResult } from "./types.js";
 
 const FINAL_TURN_DIRECTIVE =
   "FINAL TURN. Do not start new work. Save any pending changes, commit your progress, and respond with: (1) what you completed, (2) what remains unfinished.";
@@ -18,22 +17,13 @@ function assistantText(message: AssistantMessage): string {
 
 function preview(toolName: string, args: Record<string, unknown>): string {
   const value = Object.values(args).find((candidate) => typeof candidate === "string" && candidate.length > 0);
-  const detail = typeof value === "string" ? ` ${value}` : "";
-  return [...`→ ${toolName}${detail}`]
+  return [...`→ ${toolName}${typeof value === "string" ? ` ${value}` : ""}`]
     .map((character) => {
       const code = character.charCodeAt(0);
       return code < 32 || code === 127 ? " " : character;
     })
     .join("")
     .slice(0, 240);
-}
-
-function codingAgentVersion(): string {
-  try {
-    return JSON.parse(readFileSync(join(getPackageDir(), "package.json"), "utf8")).version as string;
-  } catch {
-    return "unknown";
-  }
 }
 
 export default function childBridge(pi: ExtensionAPI): void {
@@ -48,13 +38,12 @@ export default function childBridge(pi: ExtensionAPI): void {
   const tokens = { input: 0, output: 0 };
   let latest: AssistantMessage | undefined;
 
-  function send(payload: BridgePayload): Promise<void> {
-    const message: BridgeMessage = { ...payload, ownerId: manifest.ownerId, launchId: manifest.launchId };
+  function send(event: ChildEvent): Promise<void> {
     writes = writes.then(
       () =>
         new Promise<void>((resolve, reject) => {
           if (!socket || socket.destroyed) return reject(new Error("Bridge socket is closed"));
-          socket.write(`${JSON.stringify(message)}\n`, "utf8", (error) => (error ? reject(error) : resolve()));
+          socket.write(`${JSON.stringify(event)}\n`, "utf8", (error) => (error ? reject(error) : resolve()));
         }),
     );
     return writes;
@@ -76,12 +65,6 @@ export default function childBridge(pi: ExtensionAPI): void {
         resolve();
       });
     });
-    await send({
-      type: "ready",
-      protocol: manifest.protocol,
-      nonce: manifest.nonce,
-      version: codingAgentVersion(),
-    });
   });
 
   pi.on("tool_execution_start", (event) => {
@@ -100,9 +83,7 @@ export default function childBridge(pi: ExtensionAPI): void {
       tokens.output += event.message.usage.output;
     }
     await send({ type: "turn", turns, tokens: { ...tokens } });
-    if (turns === manifest.turnLimit - 1) {
-      pi.sendUserMessage(FINAL_TURN_DIRECTIVE, { deliverAs: "steer" });
-    }
+    if (turns === manifest.turnLimit - 1) pi.sendUserMessage(FINAL_TURN_DIRECTIVE, { deliverAs: "steer" });
     if (turns >= manifest.turnLimit) {
       await sendResult({ status: "truncated", output: latest ? assistantText(latest) : "" });
       ctx.abort();

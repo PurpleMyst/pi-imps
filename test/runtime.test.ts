@@ -25,12 +25,14 @@ interface FakeOptions {
   result?: TerminalResult;
   promptDelay?: number;
   resultDelay?: number;
+  promptError?: string;
   tabDelay?: number;
   duplicateResult?: boolean;
   busyStarts?: number;
   promptIdentityMismatch?: boolean;
   malformedTabCreation?: boolean;
   tabPaneCount?: number;
+  tabLabelMismatch?: boolean;
   stalledRefresh?: boolean;
 }
 
@@ -96,19 +98,12 @@ async function setup(options: FakeOptions = {}) {
         socket.on("error", () => {});
         socket.on("connect", () => {
           void readFile(childManifestPath, "utf8").then((text) => {
-            const manifest = JSON.parse(text);
-            socket.write(
-              `${JSON.stringify({ type: "ready", protocol: 1, ownerId: manifest.ownerId, launchId: manifest.launchId, nonce: manifest.nonce, version: "0.81.1" })}\n`,
-            );
+            JSON.parse(text);
             if (options.result) {
               setTimeout(() => {
-                socket.write(
-                  `${JSON.stringify({ type: "result", ownerId: manifest.ownerId, launchId: manifest.launchId, ...options.result })}\n`,
-                );
+                socket.write(`${JSON.stringify({ type: "result", ...options.result })}\n`);
                 if (options.duplicateResult) {
-                  socket.write(
-                    `${JSON.stringify({ type: "result", ownerId: manifest.ownerId, launchId: manifest.launchId, ...options.result, output: "duplicate" })}\n`,
-                  );
+                  socket.write(`${JSON.stringify({ type: "result", ...options.result, output: "duplicate" })}\n`);
                 }
               }, options.resultDelay ?? 1);
             }
@@ -125,6 +120,13 @@ async function setup(options: FakeOptions = {}) {
           reject(new Error("aborted"));
         });
       });
+      if (options.promptError) {
+        return {
+          stdout: "",
+          stderr: JSON.stringify({ error: { code: "prompt_failed", message: options.promptError } }),
+          code: 1,
+        };
+      }
       return envelope({
         type: "agent_prompted",
         agent: options.promptIdentityMismatch ? { ...identity, pane_id: "wrong:pane" } : identity,
@@ -135,7 +137,12 @@ async function setup(options: FakeOptions = {}) {
       const label = create[create.indexOf("--label") + 1];
       return envelope({
         type: "tab_info",
-        tab: { tab_id: "w1:t2", workspace_id: "w1", label, pane_count: options.tabPaneCount ?? 1 },
+        tab: {
+          tab_id: "w1:t2",
+          workspace_id: "w1",
+          label: options.tabLabelMismatch ? "different" : label,
+          pane_count: options.tabPaneCount ?? 1,
+        },
       });
     }
     if (args[0] === "pane" && args[1] === "get" && args[2] === "w1:p2")
@@ -242,6 +249,28 @@ describe("GoblinRuntime lifecycle", () => {
     expect(result?.output).toBe("final allowed turn");
   });
 
+  it("lets an earlier result win over a later prompt failure", async () => {
+    const { runtime, prepared } = await setup({
+      result: { status: "completed", output: "authoritative" },
+      promptDelay: 20,
+      promptError: "late prompt failure",
+    });
+    const [result] = await runtime.wait("all", [runtime.summon(prepared, "/tmp")]);
+    expect(result).toEqual(expect.objectContaining({ status: "completed", output: "authoritative" }));
+  });
+
+  it("fails on prompt failure before a result and on a missing result after prompt success", async () => {
+    const failed = await setup({ promptError: "prompt failed" });
+    const [promptFailure] = await failed.runtime.wait("all", [failed.runtime.summon(failed.prepared, "/tmp")]);
+    expect(promptFailure).toEqual(expect.objectContaining({ status: "failed", error: "prompt failed" }));
+
+    const missing = await setup();
+    const [missingResult] = await missing.runtime.wait("all", [missing.runtime.summon(missing.prepared, "/tmp")]);
+    expect(missingResult).toEqual(
+      expect.objectContaining({ status: "failed", error: "Child did not publish a result after the prompt completed" }),
+    );
+  });
+
   it("dismisses synchronously and claims before asynchronous cleanup", async () => {
     const { runtime, prepared, calls } = await setup({ promptDelay: 10_000 });
     const name = runtime.summon(prepared, "/tmp");
@@ -272,17 +301,6 @@ describe("GoblinRuntime lifecycle", () => {
     expect(calls.filter((call) => call[1] === "agent" && call[2] === "start")).toHaveLength(2);
   });
 
-  it("fails a mismatched Herdr prompt identity", async () => {
-    const { runtime, prepared } = await setup({
-      result: { status: "completed", output: "untrusted" },
-      promptIdentityMismatch: true,
-    });
-    const name = runtime.summon(prepared, "/tmp");
-    const [result] = await runtime.wait("all", [name]);
-    expect(result?.status).toBe("failed");
-    expect(result?.error).toContain("prompt response identity mismatch");
-  });
-
   it("waits for in-flight tab creation before aborting and closing it", async () => {
     const { runtime, prepared, calls } = await setup({ tabDelay: 30 });
     const name = runtime.summon(prepared, "/tmp");
@@ -291,16 +309,6 @@ describe("GoblinRuntime lifecycle", () => {
     await runtime.shutdown();
     expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(true);
     expect(calls.some((call) => call[1] === "workspace" && call[2] === "close")).toBe(false);
-  });
-
-  it("closes only the goblin pane when its tab contains another pane", async () => {
-    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000, tabPaneCount: 2 });
-    const name = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
-    runtime.dismiss(name);
-    await runtime.shutdown();
-    expect(calls.some((call) => call[1] === "pane" && call[2] === "close")).toBe(true);
-    expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
   });
 
   it("cancels an in-flight display refresh during dismissal", async () => {
@@ -318,6 +326,28 @@ describe("GoblinRuntime lifecycle", () => {
     await expect(refresh).resolves.toBeUndefined();
     expect(wasRefreshAborted()).toBe(true);
     await runtime.shutdown();
+  });
+
+  it("caches status refreshes and targets the stored pane ID", async () => {
+    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000 });
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    await Promise.all([runtime.refreshAll([name]), runtime.refreshAll([name])]);
+    await runtime.refreshAll([name]);
+    const gets = calls.filter((call) => call[1] === "agent" && call[2] === "get");
+    expect(gets).toHaveLength(1);
+    expect(gets[0]?.[3]).toBe("w1:p2");
+    runtime.dismiss(name);
+    await runtime.shutdown();
+  });
+
+  it("does not close a tab whose label changed", async () => {
+    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000, tabLabelMismatch: true });
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    runtime.dismiss(name);
+    await runtime.shutdown();
+    expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
   });
 
   it("memoizes shutdown without retaining the 65-second barrier after cleanup", async () => {

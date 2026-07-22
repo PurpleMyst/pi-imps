@@ -2,76 +2,58 @@ import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 
 const NonnegativeInteger = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
-const Identity = {
-  ownerId: Type.String(),
-  launchId: Type.String(),
-};
 
-export const TerminalResultSchema = Type.Union([
-  Type.Object({ status: Type.Literal("completed"), output: Type.String(), error: Type.Optional(Type.Never()) }),
-  Type.Object({ status: Type.Literal("failed"), output: Type.String(), error: Type.String() }),
-  Type.Object({ status: Type.Literal("truncated"), output: Type.String(), error: Type.Optional(Type.Never()) }),
+const ResultEventSchema = Type.Union([
+  Type.Object(
+    { type: Type.Literal("result"), status: Type.Literal("completed"), output: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("result"),
+      status: Type.Literal("failed"),
+      output: Type.String(),
+      error: Type.String(),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { type: Type.Literal("result"), status: Type.Literal("truncated"), output: Type.String() },
+    { additionalProperties: false },
+  ),
 ]);
 
-export const ChildManifestSchema = Type.Object({
-  protocol: Type.Literal(1),
-  ownerId: Type.String(),
-  launchId: Type.String(),
-  nonce: Type.String(),
-  socketPath: Type.String(),
-  turnLimit: NonnegativeInteger,
-});
-
-export const BridgeMessageSchema = Type.Union([
-  Type.Object({
-    ...Identity,
-    type: Type.Literal("ready"),
-    protocol: Type.Literal(1),
-    nonce: Type.String(),
-    version: Type.String(),
-  }),
-  Type.Object({ ...Identity, type: Type.Literal("tool"), preview: Type.String() }),
-  Type.Object({
-    ...Identity,
-    type: Type.Literal("turn"),
-    turns: NonnegativeInteger,
-    tokens: Type.Object({ input: NonnegativeInteger, output: NonnegativeInteger }),
-  }),
-  Type.Object({
-    ...Identity,
-    type: Type.Literal("result"),
-    status: Type.Literal("completed"),
-    output: Type.String(),
-    error: Type.Optional(Type.Never()),
-  }),
-  Type.Object({
-    ...Identity,
-    type: Type.Literal("result"),
-    status: Type.Literal("failed"),
-    output: Type.String(),
-    error: Type.String(),
-  }),
-  Type.Object({
-    ...Identity,
-    type: Type.Literal("result"),
-    status: Type.Literal("truncated"),
-    output: Type.String(),
-    error: Type.Optional(Type.Never()),
-  }),
-  Type.Object({ ...Identity, type: Type.Literal("error"), error: Type.String() }),
+export const ChildEventSchema = Type.Union([
+  Type.Object({ type: Type.Literal("tool"), preview: Type.String() }, { additionalProperties: false }),
+  Type.Object(
+    {
+      type: Type.Literal("turn"),
+      turns: NonnegativeInteger,
+      tokens: Type.Object({ input: NonnegativeInteger, output: NonnegativeInteger }, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  ),
+  ResultEventSchema,
 ]);
 
-const bridgeMessage = Compile(BridgeMessageSchema);
+export const ChildManifestSchema = Type.Object(
+  {
+    socketPath: Type.String(),
+    turnLimit: NonnegativeInteger,
+  },
+  { additionalProperties: false },
+);
+
+const childEvent = Compile(ChildEventSchema);
 const childManifest = Compile(ChildManifestSchema);
 
-export type TerminalResult = Static<typeof TerminalResultSchema>;
+export type ChildEvent = Static<typeof ChildEventSchema>;
+type WithoutType<Event> = Event extends unknown ? Omit<Event, "type"> : never;
+export type TerminalResult = WithoutType<Extract<ChildEvent, { type: "result" }>>;
 export type ChildManifest = Static<typeof ChildManifestSchema>;
-export type BridgeMessage = Static<typeof BridgeMessageSchema>;
-type WithoutIdentity<Message> = Message extends BridgeMessage ? Omit<Message, "ownerId" | "launchId"> : never;
-export type BridgePayload = WithoutIdentity<BridgeMessage>;
 
-export function parseBridgeMessage(value: unknown): BridgeMessage {
-  if (!bridgeMessage.Check(value)) throw new Error("Invalid bridge message");
+export function parseChildEvent(value: unknown): ChildEvent {
+  if (!childEvent.Check(value)) throw new Error("Invalid child event");
   return value;
 }
 

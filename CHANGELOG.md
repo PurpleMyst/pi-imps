@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Simplify the child bridge to a private first-connection event stream with authoritative results.
+- Replace bridge/Herdr completion consensus with immediate result terminalization and a short missing-result grace after prompt completion.
+- Remove prerequisite caching, parent identity prevalidation, and defensive pane-layout cleanup; cleanup now verifies the stored tab label before closing it.
+- Preserve structured Herdr status refreshes using the goblin pane ID.
+
 ## [0.6.0](https://github.com/Jomik/pi-goblins/compare/v0.5.0...v0.6.0) (2026-05-24)
 
 

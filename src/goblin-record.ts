@@ -1,14 +1,11 @@
 import type { BridgeServer } from "./bridge.js";
 import type { GoblinSnapshot, GoblinStatus, HerdrStatus, OwnedTab, TerminalResult } from "./types.js";
 
-const COORDINATION_MS = 3_000;
+const MISSING_RESULT_GRACE_MS = 1_000;
 
 interface GoblinRecordOptions {
   readonly name: string;
   readonly task: string;
-  readonly launchId: string;
-  readonly ownerId: string;
-  readonly nonce: string;
   readonly runtimeDir: string;
   readonly socketPath: string;
   readonly onTerminal: (record: GoblinRecord) => void;
@@ -17,14 +14,11 @@ interface GoblinRecordOptions {
 export class GoblinRecord {
   readonly name: string;
   readonly task: string;
-  readonly launchId: string;
-  readonly ownerId: string;
-  readonly nonce: string;
   readonly runtimeDir: string;
   readonly socketPath: string;
   readonly launchController = new AbortController();
   readonly done: Promise<void>;
-  readonly ready: Promise<void>;
+  readonly connected: Promise<void>;
 
   private status: GoblinStatus = "running";
   private turns = 0;
@@ -33,14 +27,11 @@ export class GoblinRecord {
   private error?: string;
   private activity?: string;
   private herdrStatus?: HerdrStatus;
-  private bridgeResult?: TerminalResult;
-  private promptSucceeded = false;
-  private coordinationTimer?: ReturnType<typeof setTimeout>;
+  private missingResultTimer?: ReturnType<typeof setTimeout>;
   private resolveDone!: () => void;
-  private resolveReady!: () => void;
-  private bridgeReady = false;
+  private resolveConnected!: () => void;
+  private bridgeConnected = false;
   private tab?: OwnedTab;
-  private tabCreateDone?: Promise<void>;
   private launchPromise?: Promise<void>;
   private bridge?: BridgeServer;
   private refreshPromise?: Promise<void>;
@@ -51,22 +42,15 @@ export class GoblinRecord {
   constructor(options: GoblinRecordOptions) {
     this.name = options.name;
     this.task = options.task;
-    this.launchId = options.launchId;
-    this.ownerId = options.ownerId;
-    this.nonce = options.nonce;
     this.runtimeDir = options.runtimeDir;
     this.socketPath = options.socketPath;
     this.onTerminal = options.onTerminal;
     this.done = new Promise((resolve) => (this.resolveDone = resolve));
-    this.ready = new Promise((resolve) => (this.resolveReady = resolve));
+    this.connected = new Promise((resolve) => (this.resolveConnected = resolve));
   }
 
   isRunning(): boolean {
     return this.status === "running";
-  }
-
-  hasBridgeResult(): boolean {
-    return this.bridgeResult !== undefined;
   }
 
   snapshot(): GoblinSnapshot {
@@ -92,33 +76,32 @@ export class GoblinRecord {
     this.tokens = { ...tokens };
   }
 
-  markReady(): void {
-    if (this.bridgeReady) return;
-    this.bridgeReady = true;
-    this.resolveReady();
+  markConnected(): void {
+    if (this.bridgeConnected) return;
+    this.bridgeConnected = true;
+    this.resolveConnected();
   }
 
-  isReady(): boolean {
-    return this.bridgeReady;
+  isConnected(): boolean {
+    return this.bridgeConnected;
   }
 
-  acceptBridgeResult(result: TerminalResult): void {
-    if (!this.isRunning() || this.bridgeResult) return;
-    this.bridgeResult = Object.freeze({ ...result });
-    if (result.status === "truncated") this.terminalize(result);
-    else this.coordinate();
+  acceptResult(result: TerminalResult): void {
+    this.terminalize(result);
   }
 
   acceptPromptSuccess(): void {
-    if (!this.isRunning()) return;
-    this.promptSucceeded = true;
-    this.coordinate();
+    if (!this.isRunning() || this.missingResultTimer) return;
+    this.missingResultTimer = setTimeout(
+      () => this.fail(new Error("Child did not publish a result after the prompt completed")),
+      MISSING_RESULT_GRACE_MS,
+    );
   }
 
   fail(error: unknown): void {
     this.terminalize({
       status: "failed",
-      output: this.bridgeResult?.output ?? "",
+      output: "",
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -127,40 +110,15 @@ export class GoblinRecord {
     return this.terminalize({ status: "dismissed" });
   }
 
-  private coordinate(): void {
-    if (!this.isRunning()) return;
-    if (this.bridgeResult && this.promptSucceeded) {
-      if (this.coordinationTimer) clearTimeout(this.coordinationTimer);
-      this.terminalize(this.bridgeResult);
-      return;
-    }
-    if ((this.bridgeResult || this.promptSucceeded) && !this.coordinationTimer) {
-      this.coordinationTimer = setTimeout(
-        () => this.fail(new Error("Bridge result and Herdr prompt completion did not coordinate within 3 seconds")),
-        COORDINATION_MS,
-      );
-    }
-  }
-
   private terminalize(result: TerminalResult | { readonly status: "dismissed" }): boolean {
     if (!this.isRunning()) return false;
-    if (this.coordinationTimer) clearTimeout(this.coordinationTimer);
+    if (this.missingResultTimer) clearTimeout(this.missingResultTimer);
     this.status = result.status;
-    if ("output" in result) this.output = result.output;
-    if ("error" in result) this.error = result.error;
+    if (result.status !== "dismissed") this.output = result.output;
+    if (result.status === "failed") this.error = result.error;
     this.resolveDone();
     queueMicrotask(() => this.onTerminal(this));
     return true;
-  }
-
-  beginTabCreate(): () => void {
-    let finish!: () => void;
-    this.tabCreateDone = new Promise<void>((resolve) => (finish = resolve));
-    return finish;
-  }
-
-  waitForTabCreate(): Promise<void> | undefined {
-    return this.tabCreateDone;
   }
 
   setTab(tab: OwnedTab): void {

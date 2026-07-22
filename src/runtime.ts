@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -8,20 +8,12 @@ import { GoblinCleanup } from "./goblin-cleanup.js";
 import { GoblinRecord } from "./goblin-record.js";
 import {
   type CommandRunner,
-  type HerdrAgent,
   HerdrCommandError,
   type HerdrResponse,
   herdr,
-  Prerequisites,
-  parseAgentInfo,
-  parseAgentPrompted,
-  parseAgentStarted,
-  parsePaneInfo,
+  parseAgentStatus,
   parseTabCreated,
-  parseTabInfo,
-  parseWorkspaceInfo,
   runCommand,
-  shouldInvalidatePreflight,
 } from "./herdr.js";
 import { createNamePool } from "./names.js";
 import type {
@@ -43,7 +35,6 @@ const ABORTED = Symbol("aborted");
 interface PreparedLaunch {
   readonly task: string;
   readonly launchId: string;
-  readonly nonce: string;
   readonly runtimeDir: string;
   readonly socketPath: string;
   readonly canonicalModel: string;
@@ -67,7 +58,6 @@ export interface RuntimeOptions {
   readonly parent: ParentHerdrContext;
   readonly runtimeRoot?: string;
   readonly runner?: CommandRunner;
-  readonly prerequisites?: Prerequisites;
   readonly bridgeFactory?: (manifest: ChildManifest) => BridgeServer;
 }
 
@@ -98,53 +88,22 @@ function internalAgentName(launchId: string): string {
   return `goblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
 }
 
-function identityMatches(agent: HerdrAgent, tab: OwnedTab): boolean {
-  return agent.workspaceId === tab.workspaceId && agent.paneId === tab.paneId && agent.name === tab.agentName;
-}
-
 export class GoblinRuntime {
-  readonly ownerId = randomUUID();
   private readonly records = new Map<string, GoblinRecord>();
   private readonly names = createNamePool();
   private readonly runner: CommandRunner;
-  private readonly prerequisites: Prerequisites;
   private readonly runtimeRoot: string;
   private readonly cleanup: GoblinCleanup;
   private shutdownPromise?: Promise<void>;
 
   constructor(private readonly options: RuntimeOptions) {
     this.runner = options.runner ?? runCommand;
-    this.prerequisites = options.prerequisites ?? new Prerequisites(this.runner);
     this.cleanup = new GoblinCleanup((args, signal, timeout) => this.command(args, signal, timeout));
     this.runtimeRoot =
-      options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${this.ownerId.slice(0, 8)}`);
-  }
-
-  private async validateParent(): Promise<void> {
-    const { workspaceId, tabId, paneId } = this.options.parent;
-    const [workspaceResult, tabResult, paneResult] = await Promise.all([
-      this.command(["workspace", "get", workspaceId], undefined, 3_000),
-      this.command(["tab", "get", tabId], undefined, 3_000),
-      this.command(["pane", "get", paneId], undefined, 3_000),
-    ]);
-    const workspace = parseWorkspaceInfo(workspaceResult);
-    const tab = parseTabInfo(tabResult);
-    const pane = parsePaneInfo(paneResult);
-    if (
-      workspace?.workspaceId !== workspaceId ||
-      tab?.tabId !== tabId ||
-      tab.workspaceId !== workspaceId ||
-      pane?.paneId !== paneId ||
-      pane.tabId !== tabId ||
-      pane.workspaceId !== workspaceId
-    ) {
-      throw new Error("Inherited Herdr workspace, tab, and pane identity mismatch");
-    }
+      options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${randomUUID().slice(0, 8)}`);
   }
 
   async prepare(options: PrepareOptions): Promise<PreparedLaunch> {
-    await this.prerequisites.check();
-    await this.validateParent();
     validateTask(options.task);
     const launchId = randomUUID();
     const runtimeDir = join(this.runtimeRoot, launchId);
@@ -160,7 +119,6 @@ export class GoblinRuntime {
     return {
       task: options.task,
       launchId,
-      nonce: randomBytes(32).toString("hex"),
       runtimeDir,
       socketPath,
       canonicalModel: canonical,
@@ -175,9 +133,6 @@ export class GoblinRuntime {
     const record = new GoblinRecord({
       name,
       task: prepared.task,
-      launchId: prepared.launchId,
-      ownerId: this.ownerId,
-      nonce: prepared.nonce,
       runtimeDir: prepared.runtimeDir,
       socketPath: prepared.socketPath,
       onTerminal: (terminal) => this.cleanup.schedule(terminal),
@@ -190,13 +145,12 @@ export class GoblinRuntime {
   private createBridge(manifest: ChildManifest, record: GoblinRecord): BridgeServer {
     if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest);
     return new BridgeServer(manifest, {
-      onReady: () => record.markReady(),
+      onConnect: () => record.markConnected(),
       onTool: (activity) => record.updateActivity(activity),
       onTurn: (turns, tokens) => record.updateTurn(turns, tokens),
-      onResult: (result) => record.acceptBridgeResult(result),
+      onResult: (result) => record.acceptResult(result),
       onError: (error) => {
-        if (shouldInvalidatePreflight(error)) this.prerequisites.invalidate();
-        if (record.isRunning() && !record.hasBridgeResult()) record.fail(error);
+        if (record.isRunning()) record.fail(error);
       },
     });
   }
@@ -204,10 +158,6 @@ export class GoblinRuntime {
   private async launch(record: GoblinRecord, prepared: PreparedLaunch, cwd: string): Promise<void> {
     const deadline = Date.now() + LAUNCH_DEADLINE_MS;
     const manifest: ChildManifest = {
-      protocol: 1,
-      ownerId: record.ownerId,
-      launchId: record.launchId,
-      nonce: record.nonce,
       socketPath: record.socketPath,
       turnLimit: this.options.settings.turnLimit,
     };
@@ -224,32 +174,26 @@ export class GoblinRuntime {
     record.attachBridge(bridge);
 
     const remaining = () => deadline - Date.now();
-    const label = `pi-goblin-${record.name}-${record.launchId}`;
-    const finishTabCreate = record.beginTabCreate();
-    let tabResult: HerdrResponse;
-    try {
-      tabResult = await this.command(
-        [
-          "tab",
-          "create",
-          "--workspace",
-          this.options.parent.workspaceId,
-          "--cwd",
-          cwd,
-          "--label",
-          label,
-          "--env",
-          "PI_GOBLINS_CHILD=1",
-          "--env",
-          `PI_GOBLINS_MANIFEST=${join(record.runtimeDir, "manifest.json")}`,
-          "--no-focus",
-        ],
-        record.launchController.signal,
-        remaining(),
-      );
-    } finally {
-      finishTabCreate();
-    }
+    const label = `pi-goblin-${record.name}-${prepared.launchId}`;
+    const tabResult = await this.command(
+      [
+        "tab",
+        "create",
+        "--workspace",
+        this.options.parent.workspaceId,
+        "--cwd",
+        cwd,
+        "--label",
+        label,
+        "--env",
+        "PI_GOBLINS_CHILD=1",
+        "--env",
+        `PI_GOBLINS_MANIFEST=${join(record.runtimeDir, "manifest.json")}`,
+        "--no-focus",
+      ],
+      record.launchController.signal,
+      remaining(),
+    );
     const created = parseTabCreated(tabResult);
     if (
       !created ||
@@ -265,7 +209,7 @@ export class GoblinRuntime {
       tabId: created.tab.tabId,
       paneId: created.rootPane.paneId,
       label,
-      agentName: internalAgentName(record.launchId),
+      agentName: internalAgentName(prepared.launchId),
     };
     record.setTab(tab);
 
@@ -300,10 +244,7 @@ export class GoblinRuntime {
           record.launchController.signal,
           left,
         );
-        const agent = parseAgentStarted(started);
-        if (!agent || !identityMatches(agent, tab)) {
-          throw new Error("Herdr agent start identity mismatch");
-        }
+        void started;
         break;
       } catch (error) {
         if (!(error instanceof HerdrCommandError) || error.code !== "agent_pane_busy" || Date.now() >= busyUntil)
@@ -313,34 +254,25 @@ export class GoblinRuntime {
       }
     }
 
-    if (!record.isReady()) {
+    if (!record.isConnected()) {
       await Promise.race([
-        record.ready,
+        record.connected,
         delay(Math.max(0, remaining()), record.launchController.signal).then(() => {
-          throw new Error("Timed out waiting for authenticated child readiness");
+          throw new Error("Timed out waiting for child bridge connection");
         }),
       ]);
     }
     if (remaining() <= 0) throw new Error("The shared launch deadline expired before prompting");
 
-    const prompted = await this.command(
+    await this.command(
       ["agent", "prompt", tab.agentName, record.task, "--wait", "--until", "idle", "--until", "done"],
       record.launchController.signal,
     );
-    const promptAgent = parseAgentPrompted(prompted);
-    if (!promptAgent || !identityMatches(promptAgent, tab)) {
-      throw new Error("Herdr prompt response identity mismatch");
-    }
     record.acceptPromptSuccess();
   }
 
-  private async command(args: readonly string[], signal?: AbortSignal, timeout?: number): Promise<HerdrResponse> {
-    try {
-      return await herdr(args, { runner: this.runner, signal, ...(timeout === undefined ? {} : { timeout }) });
-    } catch (error) {
-      if (shouldInvalidatePreflight(error)) this.prerequisites.invalidate();
-      throw error;
-    }
+  private command(args: readonly string[], signal?: AbortSignal, timeout?: number): Promise<HerdrResponse> {
+    return herdr(args, { runner: this.runner, signal, ...(timeout === undefined ? {} : { timeout }) });
   }
 
   has(name: string): boolean {
@@ -433,10 +365,9 @@ export class GoblinRuntime {
   private async refresh(record: GoblinRecord): Promise<void> {
     await record.refresh(REFRESH_CACHE_MS, async (tab) => {
       try {
-        const agent = parseAgentInfo(
-          await this.command(["agent", "get", tab.agentName], record.launchController.signal, 3_000),
+        return parseAgentStatus(
+          await this.command(["agent", "get", tab.paneId], record.launchController.signal, 3_000),
         );
-        if (agent && identityMatches(agent, tab)) return agent.agentStatus;
       } catch {
         // Display-only refresh never settles a goblin.
       }

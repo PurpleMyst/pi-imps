@@ -5,17 +5,6 @@ const MAX_TASK_BYTES = 64 * 1024;
 const MAX_SOCKET_PATH_BYTES = 103;
 const EXCLUDED_TOOLS = ["summon", "wait", "dismiss", "list_goblins"] as const;
 
-export function isSupportedPiVersion(text: string): boolean {
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(text.trim());
-  return Boolean(match && Number(match[1]) === 0 && Number(match[2]) === 81 && Number(match[3]) >= 1);
-}
-
-export function assertPiVersion(text: string): void {
-  if (!isSupportedPiVersion(text)) {
-    throw new Error(`Pi ${text.trim()} is unsupported; require >=0.81.1 <0.82.0`);
-  }
-}
-
 export function validateTask(task: string): void {
   if (task.includes("\0")) throw new Error("Task must not contain NUL bytes");
   if (Buffer.byteLength(task, "utf8") > MAX_TASK_BYTES) throw new Error("Task exceeds the 64 KiB UTF-8 limit");

@@ -1,155 +1,103 @@
 # pi-goblins Herdr Design
 
-## Goal and supported versions
+## Architecture
 
-Each goblin is a Pi process and PTY owned by Herdr in a dedicated tab of the parent Pi instance's workspace. The extension registers nothing unless the parent runs inside Herdr. It preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_goblins`; named-agent selection and all named-agent configuration are removed.
+Each goblin is a cooperating Pi process launched in a visible Herdr tab under the same OS user. Herdr owns the PTY and reports structured agent status; a private Unix socket carries exact child telemetry and results.
 
-Required versions:
+The extension registers `summon`, `wait`, `dismiss`, and `list_goblins` only when the parent runs in an identified Herdr pane, and never inside a goblin child. Children cannot invoke the goblin tools.
 
-- Herdr client/server `0.7.5`, protocol `17`;
-- Herdr Pi integration `v6`;
-- Pi `>=0.81.1 <0.82.0`.
+Each goblin owns:
 
-The initial release guarantees cooperative cleanup. Recovery after a hard parent crash or power loss is out of scope.
+- an in-memory `GoblinRecord` and generated public name;
+- a labelled tab in the parent workspace;
+- a mode-0700 runtime directory containing a mode-0600 manifest and socket;
+- one child bridge connection; and
+- one memoized cleanup promise.
 
-## Public contract
+The parent workspace is borrowed and is never closed. Recovery after a hard parent crash remains manual.
 
-- `summon({ task, model?, thinking? })` returns without waiting for workspace creation, child readiness, prompting, or completion. First-use prerequisites and deterministic validation run before a name is allocated.
-- A returned name denotes one task and one terminal result. Later launch failures are stored as `failed` results.
-- `wait` supports `all`, `first`, and optional name filters. `first` never cancels other goblins. Concurrent callers cannot collect the same goblin.
-- Names remain reserved until collection or dismissal.
-- `dismiss` removes running or terminal uncollected goblins. Dismissing a terminal goblin discards its result without changing its status.
-- Session replacement, reload, and cooperative shutdown stop and clean every owned worker.
-- Results preserve the latest finalized assistant message's text blocks concatenated in order without separators. Provider failures preserve partial text and return `failed`; turn-limit results return `truncated`.
-- Child Pi processes cannot invoke `summon`, `wait`, `dismiss`, or `list_goblins`.
+## Public behavior
 
-## Goblin resources and identities
+`summon` validates the task, model policy, tool selection, and runtime paths before allocating a name. It then returns without waiting for launch or completion. Operational Herdr failures become stored failed results.
 
-The extension returns before registering tools, hooks, prompt text, or UI unless `HERDR_ENV=1` and `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` are non-empty. It also returns whenever `PI_GOBLINS_CHILD=1`. The inherited Herdr identity is captured once during registration; first-summon preflight verifies that the workspace, tab, and pane still exist and agree.
+`wait` collects immutable snapshots in `all` or `first` mode. Concurrent callers claim synchronously, so a goblin can be collected only once. An aborted wait claims nothing. `dismiss` claims and cleans running or terminal uncollected goblins. Names remain reserved until collection or dismissal.
 
-Each goblin has:
+Results are:
 
-- a public in-memory record and generated public name;
-- a random owner ID, launch ID, nonce, and lowercase Herdr agent name;
-- a uniquely labelled `pi-goblin-<public-name>-<launch-id>` tab in the parent workspace;
-- a private mode-0700 runtime directory, mode-0600 manifest, and Unix socket;
-- the child bridge extension; and
-- an idempotent memoized cleanup promise.
-
-The parent workspace is borrowed and is never closed. Public and Herdr identities are separate. Tab, pane, and agent responses are accepted only when their recorded workspace, tab, pane, label, and internal agent identity match the goblin.
-
-Herdr starts the tab with `PI_GOBLINS_CHILD=1` and `PI_GOBLINS_MANIFEST=<absolute path>`. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
-
-## Prerequisites and deterministic validation
-
-The first summon in a parent session performs one shared check:
-
-```text
-herdr --version
-herdr status server --json
-herdr integration status
-pi --version
-```
-
-It requires the supported client/server versions, protocol, running compatible server, structurally parsed `pi: current (v6)` integration entry (a trailing path is allowed), and supported Pi version. It never installs or updates software. Integration errors direct the user to:
-
-```text
-herdr integration install pi
-```
-
-Successful preflight is cached. A later Herdr version, protocol, integration, socket, or server-availability error invalidates it.
-
-Before allocating a public name, the extension validates:
-
-- the captured parent workspace, tab, and pane still exist and agree;
-- no NUL in the task and at most 64 KiB UTF-8;
-- absolute runtime paths and a portable Unix-socket path bound;
-- model resolution and policy;
-- tool and settings resolution.
-
-## Model, tools, and trust
-
-Model source order is explicit `summon.model`, then the current parent model. Available candidates come from `ctx.modelRegistry.getAvailable()` and canonicalize to `provider/id`.
-
-Requested values match exact canonical ID, then exact candidate ID, then exact candidate name. At every tier, a raw match denied by policy fails immediately rather than falling through. Allowed matches are deduplicated by canonical ID; multiple canonical matches are ambiguous.
-
-Optional global `modelPatterns` in `~/.pi/agent/goblins.json` is a case-sensitive, whole-string canonical model allowlist. Only `*` and `?` are wildcards. Omission permits all models; `[]` permits none. Project configuration cannot broaden it.
-
-The child always receives canonical `provider/model`. Tool selection is tri-state after removing the four goblin tools:
-
-| Resolved tools | Pi arguments |
-| --- | --- |
-| `undefined` | no selection argument |
-| `[]` | `--no-tools` |
-| non-empty | `--tools <comma-separated>` |
-
-Every child also receives `--exclude-tools summon,wait,dismiss,list_goblins`, `--no-session`, the selected thinking level, the bridge extension, and `--approve` or `--no-approve` captured from `ctx.isProjectTrusted()` at summon time.
-
-## Launch and prompting
-
-The parent creates the socket listener before the tab. It creates one unfocused Herdr tab in the captured parent workspace, rooted at the parent's cwd, then invokes `herdr agent start` with argument arrays, `--kind pi`, the tab's root pane, and child Pi arguments.
-
-Tab creation, interactive agent start, and authenticated bridge readiness share one absolute 60-second deadline. `agent start` retries only `agent_pane_busy`, every 250 ms, for at most five seconds and never beyond the shared deadline. Herdr's start timeout must remain greater than 3000 ms; launch fails rather than extending the deadline.
-
-The task is not a Pi startup argument. After both Herdr interactive readiness and bridge `ready`, the parent submits:
-
-```text
-herdr agent prompt NAME TASK --wait --until idle --until done
-```
-
-Its successful identity-matched response is the only Herdr completion signal. `blocked` is display state, not completion, and there is no task wall-clock timeout.
-
-Herdr state is refreshed only for `list_goblins`, active wait progress, and brief dismissal cleanup. Per-goblin refreshes are single-flight and cached for about one second. They are display/diagnostic data and never settle a result.
-
-## Child bridge protocol
-
-The bridge connects during `session_start` and closes idempotently in `session_shutdown`. Newline-delimited JSON is authenticated by protocol version, owner ID, launch ID, and random nonce. The first message is `ready` and includes the exact child Pi version, which must satisfy the supported range. Exactly one connection is accepted.
-
-Messages are:
-
-- `ready`: protocol and identity;
-- `tool`: sanitized short activity preview;
-- `turn`: monotonic cumulative turns and input/output usage;
-- `result`: complete immutable terminal result;
-- `error`: fatal bridge failure that cannot produce a result.
-
-Telemetry lines are limited to 64 KiB and `result` to 16 MiB. UTF-8, identity, counters, size, and status invariants are validated. The first valid result is immutable; duplicate results are protocol diagnostics and cannot replace it.
-
-Statuses:
-
-- `completed`: exact latest finalized assistant text;
-- `failed`: exact partial text and provider error;
+- `completed`: exact text blocks from the latest finalized assistant message;
+- `failed`: exact partial text plus the provider or lifecycle error;
 - `truncated`: exact final allowed-turn text.
 
-At turn `limit - 1`, the bridge steers the final-turn directive. At turn `limit`, it publishes and drains the truncated result before calling Pi's supported `ctx.abort()` API. A valid truncated result terminalizes immediately; Herdr settlement is cleanup.
+## Launch
 
-## Terminalization, collection, and dismissal
+Launch follows one direct path:
 
-One first-write-wins terminal compare-and-set governs each goblin.
+```text
+validate request
+→ create private runtime directory and manifest
+→ listen on bridge
+→ create an unfocused Herdr tab
+→ start Pi in the tab's root pane
+→ await the first bridge connection
+→ submit the task with agent prompt
+```
 
-`completed` and provider `failed` require both a validated bridge result and successful identity-matched prompt response. The counterpart has three seconds to arrive after the first signal; otherwise the goblin receives a stable coordination failure. `truncated` requires only its validated bridge result. `dismissed` can win only while running. Later protocol errors are diagnostics.
+Tab creation, agent start, and bridge connection share a 60-second deadline. `agent start` retries `agent_pane_busy` for at most five seconds. The task is submitted only after the child connects.
 
-Every wait mode and dismissal uses one synchronous claim operation. Claim verifies map identity, atomically removes the record, releases the name, and returns a frozen snapshot. An aborted wait claims nothing. A `wait(first)` loser re-evaluates eligible goblins and returns empty if none remain.
+No prerequisite cache or parent workspace/tab/pane prevalidation exists. The runtime lets the concrete Herdr operation report unavailable or incompatible environments. `herdr --version` remains an optional typed adapter, not a launch gate.
 
-Running dismissal publishes local `dismissed`, resolves local completion, claims/removes the goblin, then starts asynchronous interruption. Terminal dismissal preserves and discards the existing result and returns the name.
+## Child bridge
 
-## Cleanup and shutdown
+The manifest is schema-derived:
 
-Cleanup is memoized and idempotent:
+```ts
+interface ChildManifest {
+  socketPath: string;
+  turnLimit: number;
+}
+```
 
-1. abort active Herdr CLI commands;
-2. send `esc` only to an identity-matched live agent;
-3. briefly wait for idle or disappearance;
-4. close only the identity-matched owned tab;
-5. close the socket;
-6. remove the runtime directory.
+The child connects during `session_start`. Connection itself establishes readiness. The first accepted connection owns the stream and later connections are rejected.
 
-Before closing a tab, cleanup verifies its workspace, tab ID, label, root pane, and single-pane ownership. If exclusive ownership no longer holds, it closes only the identity-matched original pane when safe; otherwise it leaves the modified layout intact. It never closes the parent workspace.
+Newline-delimited, schema-validated child events are:
 
-Cleanup promises are tracked independently of the public map. Cooperative shutdown uses one shared promise and one absolute 65-second barrier for quit, reload, new/resume, fork/clone, and other session replacement flows. The extension never stops the Herdr server.
+```ts
+type ChildEvent =
+  | { type: "tool"; preview: string }
+  | { type: "turn"; turns: number; tokens: { input: number; output: number } }
+  | { type: "result"; status: "completed"; output: string }
+  | { type: "result"; status: "failed"; output: string; error: string }
+  | { type: "result"; status: "truncated"; output: string };
+```
 
-A hard parent crash can leave tabs. Identify labels beginning `pi-goblin-` with `herdr tab list --workspace <id>`, inspect them, and close the relevant ID with `herdr tab close <id>`. Automatic orphan reconciliation is deliberately deferred.
+The bridge enforces fatal UTF-8 decoding, 64-KiB telemetry and 16-MiB result limits, a 512-byte preview limit, nonnegative safe integers, monotonic turn/token counters, and one immutable result. A malformed event or disconnect before a result fails the running record. Disconnect after a result is ignored.
 
-## Verification
+The first valid result is authoritative and terminalizes immediately. A later prompt failure cannot replace it. A prompt failure fails only a still-running record. Prompt success while still running starts a one-second missing-result grace period, after which the record fails if the child did not publish a result.
 
-Unit tests use fake command runners and temporary Unix sockets, never Herdr. They cover prerequisite parsing/caching, model policy, tool/trust arguments, validation, launch coordination, bridge authentication and limits, exact results, collection races, cancellation, dismissal, refresh isolation, and cleanup memoization. An optional live suite may cover representative no-tool/tool, visibility, race, dismissal, denial, provider-failure, and cooperative-cleanup cases.
+At turn `limit - 1`, the child steers a final-turn directive. At the limit it publishes a `truncated` result before calling Pi's supported abort API.
+
+## Herdr status
+
+Rendered `agent read` output is not used. `list_goblins` and active wait progress refresh structured `idle`, `working`, or `blocked` state through `agent get`, targeting the stored pane ID because generic agent targets are unreliable. Refresh is display-only, single-flight per goblin, and cached for approximately one second.
+
+## Terminalization and cleanup
+
+`GoblinRecord` owns a first-write-wins transition from `running` to `completed`, `failed`, `truncated`, or `dismissed`. The runtime map owns atomic collection claims. Cleanup tracking is independent from the public map.
+
+Cleanup is memoized and bounded:
+
+```text
+abort active commands
+→ await launch teardown
+→ fetch the stored tab ID
+→ verify its label
+→ close the tab
+→ close the bridge
+→ remove the runtime directory
+```
+
+Cleanup does not reconstruct pane layouts, send escape, wait for idle, or use pane-level fallbacks. Cooperative shutdown dismisses all records and waits behind a 65-second barrier. It never stops the Herdr server.
+
+## Model and tool selection
+
+Model resolution uses explicit `summon.model`, then the active parent model. Canonical `provider/model` values are filtered by optional global `modelPatterns`. Tool selection remains tri-state: omitted preserves Pi defaults, empty passes `--no-tools`, and non-empty passes `--tools`. The child receives `--exclude-tools summon,wait,dismiss,list_goblins`, no session persistence, selected thinking, the bridge extension, and the captured trust mode.

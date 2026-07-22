@@ -37,10 +37,6 @@ function assistant(textBlocks: string[], stopReason: AssistantMessage["stopReaso
 async function createHarness(turnLimit = 3): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "pi-goblins-child-"));
   const manifest: ChildManifest = {
-    protocol: 1,
-    ownerId: "owner",
-    launchId: "launch",
-    nonce: "nonce",
     socketPath: join(root, "bridge.sock"),
     turnLimit,
   };
@@ -81,7 +77,6 @@ async function createHarness(turnLimit = 3): Promise<Harness> {
   } as unknown as ExtensionAPI;
   childBridge(pi);
   await harness.handlers.get("session_start")?.({}, {});
-  await eventually(() => messages.some((message) => message.type === "ready"));
   harnesses.push(harness);
   return harness;
 }
