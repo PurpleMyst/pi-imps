@@ -8,7 +8,7 @@ The extension registers `summon`, `wait`, `dismiss`, and `list_goblins` only whe
 
 Each goblin owns:
 
-- an in-memory `GoblinRecord` and generated public name;
+- an in-memory `GoblinRecord` for terminal state and a `GoblinLifecycle` for runtime resources;
 - a labelled tab in the parent workspace;
 - a mode-0700 runtime directory containing a mode-0600 manifest and socket;
 - one child bridge connection; and
@@ -42,7 +42,7 @@ validate request
 → submit the task with agent prompt
 ```
 
-Tab creation, agent start, and bridge connection share a 60-second deadline. `agent start` retries `agent_pane_busy` for at most five seconds. The task is submitted only after the child connects.
+Tab creation, agent start, and bridge connection share a 60-second deadline. `agent start` retries `agent_pane_busy` for at most five seconds. Minimal typed adapters validate successful start and prompt response kinds without restoring identity checks. The task is submitted only after the child connects.
 
 No prerequisite cache or parent workspace/tab/pane prevalidation exists. The runtime lets the concrete Herdr operation report unavailable or incompatible environments. `herdr --version` remains an optional typed adapter, not a launch gate.
 
@@ -82,7 +82,7 @@ Rendered `agent read` output is not used. `list_goblins` and active wait progres
 
 ## Terminalization and cleanup
 
-`GoblinRecord` owns a first-write-wins transition from `running` to `completed`, `failed`, `truncated`, or `dismissed`. The runtime map owns atomic collection claims. Cleanup tracking is independent from the public map.
+`GoblinRecord` owns telemetry, snapshots, and a first-write-wins transition from `running` to `completed`, `failed`, `truncated`, or `dismissed`. `GoblinLifecycle` owns launch cancellation, bridge readiness, tab and bridge handles, refresh coordination, and the memoized cleanup promise. Terminalization is the sole cleanup trigger; collection only claims the result and releases its public name. The runtime map owns atomic collection claims, while cleanup tracking is independent from that map.
 
 Cleanup is memoized and bounded:
 

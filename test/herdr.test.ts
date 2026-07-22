@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertAgentPrompted,
+  assertAgentStarted,
   type CommandRunner,
   type HerdrCommandError,
   herdr,
@@ -43,6 +45,13 @@ describe("Herdr adapters", () => {
       parseTabInfo({ type: "tab_info", tab: { tab_id: "w:t2", workspace_id: "w", label: "pi-goblin-x" } }),
     ).toEqual({ tabId: "w:t2", workspaceId: "w", label: "pi-goblin-x" });
     expect(parseTabInfo({ type: "wrong" })).toBeUndefined();
+  });
+
+  it("validates agent operation response kinds without identity checks", () => {
+    expect(() => assertAgentStarted({ type: "agent_started", agent: { arbitrary: true } })).not.toThrow();
+    expect(() => assertAgentPrompted({ type: "agent_prompted", agent: { arbitrary: true } })).not.toThrow();
+    expect(() => assertAgentStarted({ type: "agent_prompted" })).toThrow("Malformed Herdr agent start response");
+    expect(() => assertAgentPrompted({ type: "ok" })).toThrow("Malformed Herdr agent prompt response");
   });
 
   it.each(["idle", "working", "blocked", "done", "unknown"] as const)("parses %s agent status", (status) => {

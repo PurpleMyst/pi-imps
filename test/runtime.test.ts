@@ -29,9 +29,9 @@ interface FakeOptions {
   tabDelay?: number;
   duplicateResult?: boolean;
   busyStarts?: number;
-  promptIdentityMismatch?: boolean;
+  malformedStart?: boolean;
+  malformedPrompt?: boolean;
   malformedTabCreation?: boolean;
-  tabPaneCount?: number;
   tabLabelMismatch?: boolean;
   stalledRefresh?: boolean;
 }
@@ -110,7 +110,7 @@ async function setup(options: FakeOptions = {}) {
           });
         });
       }, 0);
-      return envelope({ type: "agent_started", agent: identity, argv: [] });
+      return envelope({ type: options.malformedStart ? "ok" : "agent_started", agent: identity, argv: [] });
     }
     if (args[0] === "agent" && args[1] === "prompt") {
       await new Promise<void>((resolve, reject) => {
@@ -128,8 +128,8 @@ async function setup(options: FakeOptions = {}) {
         };
       }
       return envelope({
-        type: "agent_prompted",
-        agent: options.promptIdentityMismatch ? { ...identity, pane_id: "wrong:pane" } : identity,
+        type: options.malformedPrompt ? "ok" : "agent_prompted",
+        agent: identity,
       });
     }
     if (args[0] === "tab" && args[1] === "get" && args[2] === "w1:t2") {
@@ -141,7 +141,7 @@ async function setup(options: FakeOptions = {}) {
           tab_id: "w1:t2",
           workspace_id: "w1",
           label: options.tabLabelMismatch ? "different" : label,
-          pane_count: options.tabPaneCount ?? 1,
+          pane_count: 1,
         },
       });
     }
@@ -205,7 +205,7 @@ async function terminalSnapshot(runtime: GoblinRuntime, name: string) {
 }
 
 describe("GoblinRuntime lifecycle", () => {
-  it("coordinates exact bridge output with identity-matched prompt completion", async () => {
+  it("coordinates exact bridge output with prompt completion", async () => {
     const { runtime, prepared } = await setup({ result: { status: "completed", output: "a\n\nb" } });
     const name = runtime.summon(prepared, "/tmp");
     const terminal = await terminalSnapshot(runtime, name);
@@ -223,6 +223,20 @@ describe("GoblinRuntime lifecycle", () => {
     const [result] = await runtime.wait("all", [name]);
     expect(result?.status).toBe("failed");
     expect(result?.error).toContain("Malformed or identity-mismatched Herdr tab creation response");
+  });
+
+  it("fails malformed agent start and prompt responses at the Herdr boundary", async () => {
+    const malformedStart = await setup({ malformedStart: true });
+    const [startFailure] = await malformedStart.runtime.wait("all", [
+      malformedStart.runtime.summon(malformedStart.prepared, "/tmp"),
+    ]);
+    expect(startFailure?.error).toBe("Malformed Herdr agent start response");
+
+    const malformedPrompt = await setup({ malformedPrompt: true });
+    const [promptFailure] = await malformedPrompt.runtime.wait("all", [
+      malformedPrompt.runtime.summon(malformedPrompt.prepared, "/tmp"),
+    ]);
+    expect(promptFailure?.error).toBe("Malformed Herdr agent prompt response");
   });
 
   it("preserves partial output and provider error", async () => {

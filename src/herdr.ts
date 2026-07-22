@@ -24,6 +24,8 @@ const TabCreatedSchema = Type.Object({
   tab: Type.Object({ tab_id: Type.String(), workspace_id: Type.String(), label: Type.String() }),
   root_pane: Type.Object({ pane_id: Type.String(), tab_id: Type.String(), workspace_id: Type.String() }),
 });
+const AgentStartedSchema = Type.Object({ type: Type.Literal("agent_started") });
+const AgentPromptedSchema = Type.Object({ type: Type.Literal("agent_prompted") });
 const AgentInfoSchema = Type.Object({
   type: Type.Literal("agent_info"),
   agent: Type.Object({
@@ -41,6 +43,8 @@ const herdrEnvelope = Compile(HerdrEnvelopeSchema);
 const tabInfo = Compile(TabInfoSchema);
 const tabCreated = Compile(TabCreatedSchema);
 const agentInfo = Compile(AgentInfoSchema);
+const agentStarted = Compile(AgentStartedSchema);
+const agentPrompted = Compile(AgentPromptedSchema);
 
 export type HerdrResponse = Static<typeof HerdrResponseSchema>;
 
@@ -148,6 +152,14 @@ export function parseTabCreated(response: HerdrResponse): HerdrCreatedTab | unde
       workspaceId: response.root_pane.workspace_id,
     },
   };
+}
+
+export function assertAgentStarted(response: HerdrResponse): void {
+  if (!agentStarted.Check(response)) throw new Error("Malformed Herdr agent start response");
+}
+
+export function assertAgentPrompted(response: HerdrResponse): void {
+  if (!agentPrompted.Check(response)) throw new Error("Malformed Herdr agent prompt response");
 }
 
 export function parseAgentStatus(response: HerdrResponse): HerdrStatus | undefined {

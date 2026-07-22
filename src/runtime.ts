@@ -5,8 +5,10 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { BridgeServer } from "./bridge.js";
 import { GoblinCleanup } from "./goblin-cleanup.js";
-import { GoblinRecord } from "./goblin-record.js";
+import { GoblinLifecycle } from "./goblin-lifecycle.js";
 import {
+  assertAgentPrompted,
+  assertAgentStarted,
   type CommandRunner,
   HerdrCommandError,
   type HerdrResponse,
@@ -89,7 +91,7 @@ function internalAgentName(launchId: string): string {
 }
 
 export class GoblinRuntime {
-  private readonly records = new Map<string, GoblinRecord>();
+  private readonly goblins = new Map<string, GoblinLifecycle>();
   private readonly names = createNamePool();
   private readonly runner: CommandRunner;
   private readonly runtimeRoot: string;
@@ -130,22 +132,20 @@ export class GoblinRuntime {
 
   summon(prepared: PreparedLaunch, cwd: string): string {
     const name = this.names.allocate();
-    const record = new GoblinRecord({
-      name,
-      task: prepared.task,
-      runtimeDir: prepared.runtimeDir,
-      socketPath: prepared.socketPath,
-      onTerminal: (terminal) => this.cleanup.schedule(terminal),
-    });
-    this.records.set(name, record);
-    record.setLaunchPromise(this.launch(record, prepared, cwd).catch((error) => record.fail(error)));
+    const lifecycle = new GoblinLifecycle(name, prepared.task, prepared.runtimeDir, prepared.socketPath, (terminal) =>
+      this.cleanup.schedule(terminal),
+    );
+    const { record } = lifecycle;
+    this.goblins.set(name, lifecycle);
+    lifecycle.setLaunchPromise(this.launch(lifecycle, prepared, cwd).catch((error) => record.fail(error)));
     return name;
   }
 
-  private createBridge(manifest: ChildManifest, record: GoblinRecord): BridgeServer {
+  private createBridge(manifest: ChildManifest, lifecycle: GoblinLifecycle): BridgeServer {
     if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest);
+    const { record } = lifecycle;
     return new BridgeServer(manifest, {
-      onConnect: () => record.markConnected(),
+      onConnect: () => lifecycle.markConnected(),
       onTool: (activity) => record.updateActivity(activity),
       onTurn: (turns, tokens) => record.updateTurn(turns, tokens),
       onResult: (result) => record.acceptResult(result),
@@ -155,23 +155,24 @@ export class GoblinRuntime {
     });
   }
 
-  private async launch(record: GoblinRecord, prepared: PreparedLaunch, cwd: string): Promise<void> {
+  private async launch(lifecycle: GoblinLifecycle, prepared: PreparedLaunch, cwd: string): Promise<void> {
+    const { record } = lifecycle;
     const deadline = Date.now() + LAUNCH_DEADLINE_MS;
     const manifest: ChildManifest = {
-      socketPath: record.socketPath,
+      socketPath: lifecycle.socketPath,
       turnLimit: this.options.settings.turnLimit,
     };
-    const bridge = this.createBridge(manifest, record);
-    await mkdir(record.runtimeDir, { recursive: true, mode: 0o700 });
-    await writeFile(join(record.runtimeDir, "manifest.json"), JSON.stringify(manifest), {
+    const bridge = this.createBridge(manifest, lifecycle);
+    await mkdir(lifecycle.runtimeDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(lifecycle.runtimeDir, "manifest.json"), JSON.stringify(manifest), {
       mode: 0o600,
       flag: "wx",
     }).catch(async (error) => {
-      await rm(record.runtimeDir, { recursive: true, force: true });
+      await rm(lifecycle.runtimeDir, { recursive: true, force: true });
       throw error;
     });
-    await bridge.listen(record.runtimeDir);
-    record.attachBridge(bridge);
+    await bridge.listen(lifecycle.runtimeDir);
+    lifecycle.attachBridge(bridge);
 
     const remaining = () => deadline - Date.now();
     const label = `pi-goblin-${record.name}-${prepared.launchId}`;
@@ -188,10 +189,10 @@ export class GoblinRuntime {
         "--env",
         "PI_GOBLINS_CHILD=1",
         "--env",
-        `PI_GOBLINS_MANIFEST=${join(record.runtimeDir, "manifest.json")}`,
+        `PI_GOBLINS_MANIFEST=${join(lifecycle.runtimeDir, "manifest.json")}`,
         "--no-focus",
       ],
-      record.launchController.signal,
+      lifecycle.controller.signal,
       remaining(),
     );
     const created = parseTabCreated(tabResult);
@@ -211,7 +212,7 @@ export class GoblinRuntime {
       label,
       agentName: internalAgentName(prepared.launchId),
     };
-    record.setTab(tab);
+    lifecycle.setTab(tab);
 
     const args = buildPiArgs(
       {
@@ -241,33 +242,34 @@ export class GoblinRuntime {
             "--",
             ...args,
           ],
-          record.launchController.signal,
+          lifecycle.controller.signal,
           left,
         );
-        void started;
+        assertAgentStarted(started);
         break;
       } catch (error) {
         if (!(error instanceof HerdrCommandError) || error.code !== "agent_pane_busy" || Date.now() >= busyUntil)
           throw error;
-        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), record.launchController.signal);
+        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), lifecycle.controller.signal);
         if (Date.now() >= busyUntil) throw error;
       }
     }
 
-    if (!record.isConnected()) {
+    if (!lifecycle.isConnected()) {
       await Promise.race([
-        record.connected,
-        delay(Math.max(0, remaining()), record.launchController.signal).then(() => {
+        lifecycle.connected,
+        delay(Math.max(0, remaining()), lifecycle.controller.signal).then(() => {
           throw new Error("Timed out waiting for child bridge connection");
         }),
       ]);
     }
     if (remaining() <= 0) throw new Error("The shared launch deadline expired before prompting");
 
-    await this.command(
+    const prompted = await this.command(
       ["agent", "prompt", tab.agentName, record.task, "--wait", "--until", "idle", "--until", "done"],
-      record.launchController.signal,
+      lifecycle.controller.signal,
     );
+    assertAgentPrompted(prompted);
     record.acceptPromptSuccess();
   }
 
@@ -276,7 +278,7 @@ export class GoblinRuntime {
   }
 
   has(name: string): boolean {
-    return this.records.has(name);
+    return this.goblins.has(name);
   }
 
   hasEligible(names?: readonly string[]): boolean {
@@ -285,14 +287,14 @@ export class GoblinRuntime {
 
   runningCount(): number {
     let count = 0;
-    for (const record of this.records.values()) {
+    for (const { record } of this.goblins.values()) {
       if (record.isRunning()) count++;
     }
     return count;
   }
 
   snapshots(names?: readonly string[]): GoblinSnapshot[] {
-    return this.eligible(names ? new Set(names) : undefined).map((record) => record.snapshot());
+    return this.eligible(names ? new Set(names) : undefined).map(({ record }) => record.snapshot());
   }
 
   async wait(mode: "all" | "first", names?: readonly string[], signal?: AbortSignal): Promise<GoblinSnapshot[]> {
@@ -304,12 +306,12 @@ export class GoblinRuntime {
 
     if (mode === "all") {
       const outcome = await Promise.race([
-        Promise.all(waiting.map((record) => record.done)).then(() => "done" as const),
+        Promise.all(waiting.map(({ record }) => record.done)).then(() => "done" as const),
         ...(abortPromise ? [abortPromise] : []),
       ]);
       if (outcome === ABORTED || signal?.aborted) return [];
-      for (const record of waiting) {
-        const snapshot = this.claim(record);
+      for (const lifecycle of waiting) {
+        const snapshot = this.claim(lifecycle);
         if (snapshot && snapshot.status !== "dismissed") claimed.push(snapshot);
       }
       return claimed;
@@ -319,7 +321,7 @@ export class GoblinRuntime {
       waiting = this.eligible(filter);
       if (waiting.length === 0) return claimed;
       const outcome = await Promise.race([
-        ...waiting.map((record) => record.done.then(() => record)),
+        ...waiting.map((lifecycle) => lifecycle.record.done.then(() => lifecycle)),
         ...(abortPromise ? [abortPromise] : []),
       ]);
       if (outcome === ABORTED || signal?.aborted) return [];
@@ -331,43 +333,41 @@ export class GoblinRuntime {
     }
   }
 
-  private eligible(names: ReadonlySet<string> | undefined): GoblinRecord[] {
-    return [...this.records.values()].filter((record) => !names || names.has(record.name));
+  private eligible(names: ReadonlySet<string> | undefined): GoblinLifecycle[] {
+    return [...this.goblins.values()].filter(({ record }) => !names || names.has(record.name));
   }
 
-  private claim(record: GoblinRecord): GoblinSnapshot | undefined {
-    if (record.isRunning() || this.records.get(record.name) !== record) return undefined;
-    this.records.delete(record.name);
+  private claim(lifecycle: GoblinLifecycle): GoblinSnapshot | undefined {
+    const { record } = lifecycle;
+    if (record.isRunning() || this.goblins.get(record.name) !== lifecycle) return undefined;
+    this.goblins.delete(record.name);
     this.names.release(record.name);
-    const snapshot = record.snapshot();
-    this.cleanup.schedule(record);
-    return snapshot;
+    return record.snapshot();
   }
 
   dismiss(name: string): string[] {
     const targets =
       name === "all"
-        ? [...this.records.values()]
-        : [this.records.get(name)].filter((record): record is GoblinRecord => Boolean(record));
+        ? [...this.goblins.values()]
+        : [this.goblins.get(name)].filter((lifecycle): lifecycle is GoblinLifecycle => Boolean(lifecycle));
     const dismissed: string[] = [];
-    for (const record of targets) {
+    for (const lifecycle of targets) {
+      const { record } = lifecycle;
       if (record.isRunning()) record.dismiss();
-      if (this.claim(record)) dismissed.push(record.name);
+      if (this.claim(lifecycle)) dismissed.push(record.name);
     }
     return dismissed;
   }
 
   async refreshAll(names?: readonly string[]): Promise<void> {
-    const records = this.eligible(names ? new Set(names) : undefined);
-    await Promise.all(records.map((record) => this.refresh(record)));
+    const goblins = this.eligible(names ? new Set(names) : undefined);
+    await Promise.all(goblins.map((lifecycle) => this.refresh(lifecycle)));
   }
 
-  private async refresh(record: GoblinRecord): Promise<void> {
-    await record.refresh(REFRESH_CACHE_MS, async (tab) => {
+  private async refresh(lifecycle: GoblinLifecycle): Promise<void> {
+    await lifecycle.refresh(REFRESH_CACHE_MS, async (tab) => {
       try {
-        return parseAgentStatus(
-          await this.command(["agent", "get", tab.paneId], record.launchController.signal, 3_000),
-        );
+        return parseAgentStatus(await this.command(["agent", "get", tab.paneId], lifecycle.controller.signal, 3_000));
       } catch {
         // Display-only refresh never settles a goblin.
       }

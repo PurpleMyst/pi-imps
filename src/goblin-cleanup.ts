@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import type { GoblinRecord } from "./goblin-record.js";
+import type { GoblinLifecycle } from "./goblin-lifecycle.js";
 import { type HerdrResponse, parseTabInfo } from "./herdr.js";
 
 const SHUTDOWN_BARRIER_MS = 65_000;
@@ -11,8 +11,8 @@ export class GoblinCleanup {
 
   constructor(private readonly command: HerdrCommand) {}
 
-  schedule(record: GoblinRecord): void {
-    const cleanup = record.cleanup(() => this.run(record));
+  schedule(lifecycle: GoblinLifecycle): void {
+    const cleanup = lifecycle.cleanup(() => this.run(lifecycle));
     this.active.add(cleanup);
     cleanup.finally(() => this.active.delete(cleanup)).catch(() => {});
   }
@@ -28,11 +28,11 @@ export class GoblinCleanup {
     });
   }
 
-  private async run(record: GoblinRecord): Promise<void> {
-    record.launchController.abort();
-    await record.waitForLaunch()?.catch(() => {});
+  private async run(lifecycle: GoblinLifecycle): Promise<void> {
+    lifecycle.controller.abort();
+    await lifecycle.waitForLaunch()?.catch(() => {});
 
-    const tab = record.getTab();
+    const tab = lifecycle.getTab();
     if (tab) {
       try {
         const current = parseTabInfo(await this.command(["tab", "get", tab.tabId], undefined, 3_000));
@@ -43,7 +43,7 @@ export class GoblinCleanup {
         // The tab may already be gone; cleanup continues independently.
       }
     }
-    await record.closeBridge().catch(() => {});
-    await rm(record.runtimeDir, { recursive: true, force: true });
+    await lifecycle.closeBridge().catch(() => {});
+    await rm(lifecycle.runtimeDir, { recursive: true, force: true });
   }
 }
