@@ -1,5 +1,5 @@
 import { type Static, Type } from "typebox";
-import Schema from "typebox/schema";
+import { Compile } from "typebox/compile";
 
 const NonnegativeInteger = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const Identity = {
@@ -61,8 +61,8 @@ export const BridgeMessageSchema = Type.Union([
   Type.Object({ ...Identity, type: Type.Literal("error"), error: Type.String() }),
 ]);
 
-const bridgeMessage = Schema.Compile(BridgeMessageSchema);
-const childManifest = Schema.Compile(ChildManifestSchema);
+const bridgeMessage = Compile(BridgeMessageSchema);
+const childManifest = Compile(ChildManifestSchema);
 
 export type TerminalResult = Static<typeof TerminalResultSchema>;
 export type ChildManifest = Static<typeof ChildManifestSchema>;

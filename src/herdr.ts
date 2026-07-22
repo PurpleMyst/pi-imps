@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { type Static, Type } from "typebox";
-import Schema from "typebox/schema";
+import { Compile } from "typebox/compile";
 import type { HerdrStatus } from "./types.js";
 import { assertPiVersion } from "./validation.js";
 
@@ -89,15 +89,15 @@ const AgentInfoSchema = Type.Object({
   }),
 });
 
-const herdrEnvelope = Schema.Compile(HerdrEnvelopeSchema);
-const serverStatus = Schema.Compile(ServerStatusSchema);
-const workspaceInfo = Schema.Compile(WorkspaceInfoSchema);
-const tabInfo = Schema.Compile(TabInfoSchema);
-const paneInfo = Schema.Compile(PaneInfoSchema);
-const tabCreated = Schema.Compile(TabCreatedSchema);
-const agentStarted = Schema.Compile(AgentStartedSchema);
-const agentPrompted = Schema.Compile(AgentPromptedSchema);
-const agentInfo = Schema.Compile(AgentInfoSchema);
+const herdrEnvelope = Compile(HerdrEnvelopeSchema);
+const serverStatus = Compile(ServerStatusSchema);
+const workspaceInfo = Compile(WorkspaceInfoSchema);
+const tabInfo = Compile(TabInfoSchema);
+const paneInfo = Compile(PaneInfoSchema);
+const tabCreated = Compile(TabCreatedSchema);
+const agentStarted = Compile(AgentStartedSchema);
+const agentPrompted = Compile(AgentPromptedSchema);
+const agentInfo = Compile(AgentInfoSchema);
 
 export type HerdrResponse = Static<typeof HerdrResponseSchema>;
 
