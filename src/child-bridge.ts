@@ -3,7 +3,8 @@ import { Socket } from "node:net";
 import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, getPackageDir } from "@earendil-works/pi-coding-agent";
-import type { BridgeMessage, BridgePayload, ChildManifest, TerminalResult } from "./types.js";
+import { parseChildManifest } from "./bridge-protocol.js";
+import type { BridgeMessage, BridgePayload, TerminalResult } from "./types.js";
 
 const FINAL_TURN_DIRECTIVE =
   "FINAL TURN. Do not start new work. Save any pending changes, commit your progress, and respond with: (1) what you completed, (2) what remains unfinished.";
@@ -39,7 +40,7 @@ export default function childBridge(pi: ExtensionAPI): void {
   const manifestPath = process.env.PI_GOBLINS_MANIFEST;
   if (process.env.PI_GOBLINS_CHILD !== "1" || !manifestPath) return;
 
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ChildManifest;
+  const manifest = parseChildManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
   let socket: Socket | undefined;
   let writes = Promise.resolve();
   let terminal = false;

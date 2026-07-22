@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { type Static, Type } from "typebox";
 import Schema from "typebox/schema";
 import type { HerdrStatus } from "./types.js";
+import { assertPiVersion } from "./validation.js";
+
+export { assertPiVersion } from "./validation.js";
 
 export const HERDR_VERSION = "0.7.5";
 export const HERDR_PROTOCOL = 17;
@@ -283,13 +286,6 @@ export function parsePiIntegration(text: string): { state: string; version?: str
     if (match) return { state: match[1] ?? "", version: match[2] };
   }
   throw new Error("Herdr integration status did not contain a valid pi entry");
-}
-
-export function assertPiVersion(text: string): void {
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(text.trim());
-  if (!match || Number(match[1]) !== 0 || Number(match[2]) !== 81 || Number(match[3]) < 1) {
-    throw new Error(`Pi ${text.trim()} is unsupported; require >=0.81.1 <0.82.0`);
-  }
 }
 
 export function shouldInvalidatePreflight(error: unknown): boolean {

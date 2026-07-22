@@ -1,8 +1,9 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { TextDecoder } from "node:util";
+import { parseBridgeMessage } from "./bridge-protocol.js";
 import type { BridgeMessage, ChildManifest, TerminalResult } from "./types.js";
-import { validateRuntimePaths } from "./validation.js";
+import { isSupportedPiVersion, validateRuntimePaths } from "./validation.js";
 
 export const TELEMETRY_LIMIT = 64 * 1024;
 export const RESULT_LIMIT = 16 * 1024 * 1024;
@@ -14,15 +15,6 @@ export interface BridgeHandlers {
   readonly onTurn: (turns: number, tokens: { input: number; output: number }) => void;
   readonly onResult: (result: TerminalResult) => void;
   readonly onError: (error: Error) => void;
-}
-
-function supportedPi(version: string): boolean {
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
-  return Boolean(match && Number(match[1]) === 0 && Number(match[2]) === 81 && Number(match[3]) >= 1);
-}
-
-function nonnegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 export class BridgeServer {
@@ -102,7 +94,7 @@ export class BridgeServer {
     let message: BridgeMessage;
     try {
       const text = decoder.decode(line);
-      message = JSON.parse(text) as BridgeMessage;
+      message = parseBridgeMessage(JSON.parse(text));
       const limit = message.type === "result" ? RESULT_LIMIT : TELEMETRY_LIMIT;
       if (line.length > limit) throw new Error(`Bridge ${message.type} message exceeds its size limit`);
       this.validateIdentity(message);
@@ -112,7 +104,7 @@ export class BridgeServer {
       switch (message.type) {
         case "ready":
           if (this.ready) throw new Error("Duplicate bridge ready message");
-          if (message.protocol !== 1 || !supportedPi(message.version)) {
+          if (!isSupportedPiVersion(message.version)) {
             this.protocolError(socket, `Unsupported child protocol or Pi version ${message.version}`, true);
             return;
           }
@@ -123,16 +115,13 @@ export class BridgeServer {
           this.handlers.onReady(message.version);
           break;
         case "tool":
-          if (typeof message.preview !== "string" || Buffer.byteLength(message.preview) > 512) {
+          if (Buffer.byteLength(message.preview) > 512) {
             throw new Error("Invalid tool preview");
           }
           this.handlers.onTool(message.preview);
           break;
         case "turn":
           if (
-            !nonnegativeInteger(message.turns) ||
-            !nonnegativeInteger(message.tokens?.input) ||
-            !nonnegativeInteger(message.tokens?.output) ||
             message.turns < this.turns ||
             message.tokens.input < this.tokens.input ||
             message.tokens.output < this.tokens.output
@@ -143,30 +132,19 @@ export class BridgeServer {
           this.tokens = { ...message.tokens };
           this.handlers.onTurn(message.turns, message.tokens);
           break;
-        case "result":
+        case "result": {
           if (this.resultAccepted) throw new Error("Duplicate bridge result message");
-          if (
-            !["completed", "failed", "truncated"].includes(message.status) ||
-            typeof message.output !== "string" ||
-            (message.status === "failed" ? typeof message.error !== "string" : message.error !== undefined)
-          ) {
-            throw new Error("Invalid bridge result invariants");
-          }
           this.resultAccepted = true;
-          this.handlers.onResult(
-            Object.freeze({
-              status: message.status,
-              output: message.output,
-              ...(message.error !== undefined ? { error: message.error } : {}),
-            }),
-          );
+          const result: TerminalResult =
+            message.status === "failed"
+              ? { status: message.status, output: message.output, error: message.error }
+              : { status: message.status, output: message.output };
+          this.handlers.onResult(Object.freeze(result));
           break;
+        }
         case "error":
-          if (typeof message.error !== "string") throw new Error("Invalid bridge error");
           this.handlers.onError(new Error(message.error));
           break;
-        default:
-          throw new Error(`Unknown bridge message type: ${String((message as { type?: unknown }).type)}`);
       }
     } catch (error) {
       this.protocolError(socket, error instanceof Error ? error.message : String(error));

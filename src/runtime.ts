@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { BridgeServer } from "./bridge.js";
+import { GoblinCleanup } from "./goblin-cleanup.js";
 import { GoblinRecord } from "./goblin-record.js";
 import {
   type CommandRunner,
@@ -37,7 +38,6 @@ const LAUNCH_DEADLINE_MS = 60_000;
 const START_BUSY_RETRY_MS = 250;
 const START_BUSY_WINDOW_MS = 5_000;
 const REFRESH_CACHE_MS = 1_000;
-const SHUTDOWN_BARRIER_MS = 65_000;
 const ABORTED = Symbol("aborted");
 
 interface PreparedLaunch {
@@ -109,12 +109,13 @@ export class GoblinRuntime {
   private readonly runner: CommandRunner;
   private readonly prerequisites: Prerequisites;
   private readonly runtimeRoot: string;
-  private readonly cleanups = new Set<Promise<void>>();
+  private readonly cleanup: GoblinCleanup;
   private shutdownPromise?: Promise<void>;
 
   constructor(private readonly options: RuntimeOptions) {
     this.runner = options.runner ?? runCommand;
     this.prerequisites = options.prerequisites ?? new Prerequisites(this.runner);
+    this.cleanup = new GoblinCleanup((args, signal, timeout) => this.command(args, signal, timeout));
     this.runtimeRoot =
       options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${this.ownerId.slice(0, 8)}`);
   }
@@ -179,7 +180,7 @@ export class GoblinRuntime {
       nonce: prepared.nonce,
       runtimeDir: prepared.runtimeDir,
       socketPath: prepared.socketPath,
-      onTerminal: (terminal) => this.trackCleanup(terminal),
+      onTerminal: (terminal) => this.cleanup.schedule(terminal),
     });
     this.records.set(name, record);
     record.setLaunchPromise(this.launch(record, prepared, cwd).catch((error) => record.fail(error)));
@@ -407,7 +408,7 @@ export class GoblinRuntime {
     this.records.delete(record.name);
     this.names.release(record.name);
     const snapshot = record.snapshot();
-    this.trackCleanup(record);
+    this.cleanup.schedule(record);
     return snapshot;
   }
 
@@ -443,83 +444,11 @@ export class GoblinRuntime {
     });
   }
 
-  private trackCleanup(record: GoblinRecord): void {
-    const cleanup = this.cleanup(record);
-    this.cleanups.add(cleanup);
-    cleanup.finally(() => this.cleanups.delete(cleanup)).catch(() => {});
-  }
-
-  private cleanup(record: GoblinRecord): Promise<void> {
-    return record.cleanup(async () => {
-      await record.waitForTabCreate()?.catch(() => {});
-      record.launchController.abort();
-      await record.waitForLaunch()?.catch(() => {});
-      const tab = record.getTab();
-      if (tab) {
-        try {
-          const pane = parsePaneInfo(await this.command(["pane", "get", tab.paneId], undefined, 3_000));
-          const paneOwned =
-            pane?.paneId === tab.paneId && pane.tabId === tab.tabId && pane.workspaceId === tab.workspaceId;
-          if (paneOwned) {
-            let live = false;
-            try {
-              const agent = parseAgentInfo(await this.command(["agent", "get", tab.agentName], undefined, 2_000));
-              live = Boolean(
-                agent && identityMatches(agent, tab) && agent.agentStatus !== "idle" && agent.agentStatus !== "done",
-              );
-            } catch {}
-            if (live) {
-              await this.command(["agent", "send-keys", tab.agentName, "esc"], undefined, 2_000).catch(() => {});
-              await this.command(
-                ["agent", "wait", tab.agentName, "--until", "idle", "--until", "done", "--timeout", "2000"],
-                undefined,
-                3_000,
-              ).catch(() => {});
-            }
-            const [currentTabResult, currentPaneResult, parentTabResult] = await Promise.all([
-              this.command(["tab", "get", tab.tabId], undefined, 3_000),
-              this.command(["pane", "get", tab.paneId], undefined, 3_000),
-              this.command(["tab", "get", this.options.parent.tabId], undefined, 3_000),
-            ]);
-            const currentTab = parseTabInfo(currentTabResult);
-            const currentPane = parsePaneInfo(currentPaneResult);
-            const parentTab = parseTabInfo(parentTabResult);
-            const parentStillOwned =
-              parentTab?.tabId === this.options.parent.tabId && parentTab.workspaceId === tab.workspaceId;
-            const paneStillOwned =
-              currentPane?.paneId === tab.paneId &&
-              currentPane.tabId === tab.tabId &&
-              currentPane.workspaceId === tab.workspaceId;
-            const tabStillExclusive =
-              currentTab?.tabId === tab.tabId &&
-              currentTab.workspaceId === tab.workspaceId &&
-              currentTab.label === tab.label &&
-              currentTab.paneCount === 1;
-            if (parentStillOwned && paneStillOwned && tabStillExclusive) {
-              await this.command(["tab", "close", tab.tabId], undefined, 5_000).catch(() => {});
-            } else if (parentStillOwned && paneStillOwned) {
-              await this.command(["pane", "close", tab.paneId], undefined, 5_000).catch(() => {});
-            }
-          }
-        } catch {}
-      }
-      await record.closeBridge().catch(() => {});
-      await rm(record.runtimeDir, { recursive: true, force: true });
-    });
-  }
-
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.shutdownPromise = (async () => {
       this.dismiss("all");
-      const all = Promise.allSettled([...this.cleanups]);
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, SHUTDOWN_BARRIER_MS);
-        void all.then(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
+      await this.cleanup.drain();
     })();
     return this.shutdownPromise;
   }
