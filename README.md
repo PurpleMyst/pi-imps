@@ -1,23 +1,27 @@
 # pi-goblins
 
-Lightweight background Pi goblins, with process and PTY ownership provided by [Herdr](https://herdr.dev).
+Run background tasks in Pi.
+
+pi-goblins uses [Herdr](https://herdr.dev) for process and PTY ownership. Each goblin runs in a separate tab in the parent Pi workspace.
 
 ## Requirements
 
-- Linux or macOS
-- Herdr client/server `0.7.5` (protocol `17`)
-- Herdr Pi integration `v6`
-- Pi `>=0.81.1 <0.82.0`
+At the time of writing, these versions were known to work:
 
-Install the Herdr integration separately:
+- Linux or macOS.
+- Herdr client and server `0.7.5` with protocol `17`.
+- Herdr Pi integration `v6`.
+- Pi `>=0.81.1` and `<0.82.0`.
+
+Install the Herdr integration before you use pi-goblins:
 
 ```bash
 herdr integration install pi
 ```
 
-pi-goblins only registers its tools when Pi is running inside an identified Herdr pane. Summon validates the request locally; concrete Herdr commands report environment or compatibility failures. It never installs or updates Herdr or Pi automatically.
+pi-goblins registers its tools only in an identified Herdr pane. It validates summon requests locally. Herdr commands report environment and compatibility failures. It does not install or update Herdr or Pi.
 
-## Installation
+## Install
 
 ```bash
 pi install npm:pi-goblins
@@ -25,14 +29,14 @@ pi install npm:pi-goblins
 
 ## Tools
 
-| Tool | Behavior |
-| --- | --- |
-| `summon` | Start one direct task in a new tab of the parent Pi instance's Herdr workspace. Optional `model` and `thinking` overrides. Returns a generated name without waiting for launch or completion. |
-| `wait` | Collect terminal results with `mode: "all"` or `"first"`; optionally filter by names. `first` does not cancel other goblins. |
-| `dismiss` | Remove and clean a running or terminal uncollected goblin by name, or use `"all"`. |
-| `list_goblins` | Refresh and display current state without collecting results. |
+| Tool           | Behavior                                                                                                                                                       |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `summon`       | Start one direct task in a new Herdr tab. It returns a generated name without waiting for launch or completion. Use optional `model` and `thinking` overrides. |
+| `wait`         | Collect terminal results with `mode: "all"` or `mode: "first"`. Optionally provide `names`. `first` does not cancel other goblins.                             |
+| `dismiss`      | Stop and clean one running or terminal uncollected goblin by name. Use `"all"` to dismiss all goblins.                                                         |
+| `list_goblins` | Refresh and show current state without collecting results.                                                                                                     |
 
-Example tool flow:
+Example:
 
 ```text
 summon({ task: "Review src/auth.ts for concrete security defects." })
@@ -41,15 +45,20 @@ wait({ mode: "first" })
 wait({ mode: "all" })
 ```
 
-Each goblin is a leaf worker. The child receives `--exclude-tools summon,wait,dismiss,list_goblins`, and the main pi-goblins extension disables itself whenever `PI_GOBLINS_CHILD=1`. Outside Herdr it also remains inactive and registers nothing.
+A goblin is a leaf worker. The child cannot start another goblin. The child does not receive `summon`, `wait`, `dismiss`, or `list_goblins`. The extension disables itself in a child session. Outside Herdr, it remains inactive and registers no tools.
 
 ## Results
 
-- `completed`: exact text blocks from the child's latest finalized assistant message
-- `failed`: partial latest text plus an error, including provider failures
-- `truncated`: exact final allowed-turn text when the turn limit is reached
+A result has one of these states:
 
-Names stay reserved until `wait` collects or `dismiss` removes the goblin. Concurrent waits cannot collect the same result.
+- `completed`: Exact text blocks from the latest finalized assistant message.
+- `failed`: Partial latest text and an error, including provider errors.
+- `truncated`: Exact final allowed-turn text when the turn limit is reached.
+- `dismissed`: The task was stopped before collection.
+
+The first valid child result is authoritative. A later prompt failure cannot replace it. A prompt failure fails only a still-running goblin. A successful prompt without a child result fails after a short grace period.
+
+A name stays reserved until `wait` collects the result or `dismiss` removes it. Concurrent waits cannot collect the same result. An aborted wait collects nothing.
 
 ## Configuration
 
@@ -64,29 +73,51 @@ Global configuration lives at `~/.pi/agent/goblins.json`:
 }
 ```
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `turnLimit` | `50` | Assistant-turn circuit breaker; a wrap-up warning is sent with 10 turns remaining; minimum 2 |
-| `toolAllowlist` | omitted | Omitted keeps Pi's normal tool selection; `[]` passes `--no-tools`; a non-empty list passes `--tools` |
-| `modelPatterns` | omitted | Case-sensitive whole canonical `provider/model` globs using `*` and `?`; `[]` denies all models |
+| Setting         | Default | Meaning                                                                                                        |
+| --------------- | ------- | -------------------------------------------------------------------------------------------------------------- |
+| `turnLimit`     | `50`    | Assistant-turn circuit breaker. A wrap-up warning is sent with 10 turns remaining. Minimum: `2`.               |
+| `toolAllowlist` | Omitted | Keep Pi's normal tool selection. Use `[]` to pass `--no-tools`. Use a non-empty list to pass `--tools`.        |
+| `modelPatterns` | Omitted | Match complete, case-sensitive canonical `provider/model` names. Use `*` and `?`. Use `[]` to deny all models. |
 
-The child always receives `--exclude-tools summon,wait,dismiss,list_goblins`. Project trust is captured at summon time and forwarded as `--approve` or `--no-approve`.
+Model selection uses `summon.model` first. Otherwise, it uses the active parent model. Model patterns can restrict the selected model.
 
-Named agents, agent frontmatter, `additionalExtensions`, per-agent grants, and project `.pi/goblins.json` grants are not part of the Herdr design.
+Project trust is captured at summon time. The child receives `--approve` or `--no-approve` to match that trust mode. The child receives no session persistence. Named agents, agent frontmatter, `additionalExtensions`, per-agent grants, and project `.pi/goblins.json` grants are not supported.
 
 ## Lifecycle and cleanup
 
-Each goblin uses a private Unix socket and runtime directory plus a tab in the parent workspace labelled with its public name.
+Each goblin has a private mode-0700 runtime directory. The directory contains a mode-0600 manifest and a private Unix socket. The goblin has one Herdr tab and one bridge connection.
 
-Collection can finish before asynchronous tab cleanup, but cooperative Pi shutdown waits for tracked cleanup. pi-goblins never stops the Herdr server or closes the parent workspace. It closes each ephemeral goblin tab by its stored tab ID.
+Launch uses this order:
 
-A hard parent crash or power loss may leave a tab. Automatic orphan recovery is deferred. To clean one manually:
+1. Validate the request.
+2. Create the runtime directory and manifest.
+3. Listen on the bridge socket.
+4. Create an unfocused Herdr tab.
+5. Start Pi in the tab's root pane.
+6. Wait for the first bridge connection.
+7. Submit the task to the child.
+
+Tab creation, agent start, and bridge connection share a 60-second deadline. Agent start retries a busy pane for at most five seconds. The task is submitted only after the child connects.
+
+The child sends newline-delimited events for tool previews, turn counts, token counts, and the final result. The bridge validates every event. It enforces limits of 64 KiB for telemetry and 16 MiB for results. It accepts one immutable result. A malformed event or an early disconnect fails the goblin. A disconnect after a result is ignored.
+
+At `turnLimit - 10`, the child receives a wrap-up directive. At the limit, it publishes a `truncated` result before it aborts.
+
+Terminalization starts cleanup. Cleanup aborts active commands, waits for launch teardown, closes the stored tab, closes the bridge, and removes the runtime directory. Cleanup is bounded and memoized. Collection can finish before asynchronous cleanup finishes. Cooperative Pi shutdown waits for tracked cleanup. pi-goblins does not stop Herdr or close the parent workspace.
+
+A hard parent crash or power loss can leave a tab. Automatic orphan recovery is not available. Close an abandoned tab only after you verify its identity:
 
 ```bash
 herdr tab list --workspace <workspace-id>
 herdr tab close <tab-id>
 ```
 
-Only close tabs you have confirmed belong to abandoned goblin work.
+See [DESIGN.md](./DESIGN.md) for the complete behavior and protocol.
 
-See [DESIGN.md](./DESIGN.md) for the complete protocol and lifecycle contract.
+## Credit and comparison
+
+[pi-imps](https://github.com/Jomik/pi-imps) runs background agents in memory. pi-goblins uses Herdr to herd each goblin in its own tab. This makes each goblin more inspectable. Open its tab to check what it is doing.
+
+Both projects use the same basic summon-and-collect flow. pi-goblins adds Herdr-managed tabs, process ownership, and explicit lifecycle cleanup.
+
+Created by Jomik and PurpleMyst.
