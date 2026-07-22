@@ -25,17 +25,18 @@ interface FakeOptions {
   result?: TerminalResult;
   promptDelay?: number;
   resultDelay?: number;
-  workspaceDelay?: number;
+  tabDelay?: number;
   duplicateResult?: boolean;
   busyStarts?: number;
   promptIdentityMismatch?: boolean;
+  tabPaneCount?: number;
 }
 
 async function setup(options: FakeOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "pi-goblins-runtime-"));
   roots.push(root);
   let socketPath = "";
-  let identity = { workspace_id: "w1", pane_id: "w1:p1", name: "" };
+  let identity = { workspace_id: "w1", pane_id: "w1:p2", name: "" };
   const calls: string[][] = [];
   let starts = 0;
   const runner: CommandRunner = async (command, args, commandOptions) => {
@@ -51,17 +52,23 @@ async function setup(options: FakeOptions = {}) {
     if (command === "herdr" && args[0] === "integration")
       return { stdout: "pi: current (v6) (/tmp/pi.ts)\n", stderr: "", code: 0 };
     if (command === "pi") return { stdout: "0.81.1\n", stderr: "", code: 0 };
-    if (args[0] === "workspace" && args[1] === "create") {
-      if (options.workspaceDelay) await new Promise((resolve) => setTimeout(resolve, options.workspaceDelay));
+    if (args[0] === "workspace" && args[1] === "get")
+      return envelope({ type: "workspace_info", workspace: { workspace_id: "w1", label: "parent" } });
+    if (args[0] === "tab" && args[1] === "get" && args[2] === "w1:t1")
+      return envelope({ type: "tab_info", tab: { tab_id: "w1:t1", workspace_id: "w1", label: "parent" } });
+    if (args[0] === "pane" && args[1] === "get" && args[2] === "w1:p1")
+      return envelope({ type: "pane_info", pane: { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1" } });
+    if (args[0] === "tab" && args[1] === "create") {
+      if (options.tabDelay) await new Promise((resolve) => setTimeout(resolve, options.tabDelay));
       const manifestArg = args.find((arg) => arg.startsWith("PI_GOBLINS_MANIFEST="));
       if (!manifestArg) throw new Error("missing manifest");
       const manifest = JSON.parse(await readFile(manifestArg.slice("PI_GOBLINS_MANIFEST=".length), "utf8"));
       socketPath = manifest.socketPath;
       const label = args[args.indexOf("--label") + 1];
       return envelope({
-        type: "workspace_created",
-        workspace: { workspace_id: "w1", label },
-        root_pane: { pane_id: "w1:p1", workspace_id: "w1" },
+        type: "tab_created",
+        tab: { tab_id: "w1:t2", workspace_id: "w1", label },
+        root_pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
       });
     }
     if (args[0] === "agent" && args[1] === "start") {
@@ -119,11 +126,16 @@ async function setup(options: FakeOptions = {}) {
         agent: options.promptIdentityMismatch ? { ...identity, pane_id: "wrong:pane" } : identity,
       });
     }
-    if (args[0] === "workspace" && args[1] === "get") {
-      const create = calls.find((call) => call[1] === "workspace" && call[2] === "create") ?? [];
+    if (args[0] === "tab" && args[1] === "get" && args[2] === "w1:t2") {
+      const create = calls.find((call) => call[1] === "tab" && call[2] === "create") ?? [];
       const label = create[create.indexOf("--label") + 1];
-      return envelope({ type: "workspace_info", workspace: { workspace_id: "w1", label } });
+      return envelope({
+        type: "tab_info",
+        tab: { tab_id: "w1:t2", workspace_id: "w1", label, pane_count: options.tabPaneCount ?? 1 },
+      });
     }
+    if (args[0] === "pane" && args[1] === "get" && args[2] === "w1:p2")
+      return envelope({ type: "pane_info", pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" } });
     if (args[0] === "agent" && args[1] === "get")
       return envelope({ type: "agent_info", agent: { ...identity, agent_status: "idle" } });
     return envelope({ type: "ok" });
@@ -131,6 +143,7 @@ async function setup(options: FakeOptions = {}) {
   const runtime = new GoblinRuntime({
     settings: { turnLimit: 30, toolAllowlist: undefined, modelPatterns: undefined },
     bridgePath: "/tmp/child-bridge.ts",
+    parent: { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
     runtimeRoot: root,
     runner,
   });
@@ -198,7 +211,7 @@ describe("GoblinRuntime lifecycle", () => {
   it("dismisses synchronously and claims before asynchronous cleanup", async () => {
     const { runtime, prepared } = await setup({ promptDelay: 10_000 });
     const goblin = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => Boolean(goblin.workspace));
+    await waitUntil(() => Boolean(goblin.tab));
     expect(runtime.dismiss(goblin.name)).toEqual([goblin.name]);
     expect(goblin.status).toBe("dismissed");
     expect(runtime.goblins.has(goblin.name)).toBe(false);
@@ -239,13 +252,24 @@ describe("GoblinRuntime lifecycle", () => {
     expect(goblin.error).toContain("prompt response identity mismatch");
   });
 
-  it("waits for in-flight workspace creation before aborting and closing it", async () => {
-    const { runtime, prepared, calls } = await setup({ workspaceDelay: 30 });
+  it("waits for in-flight tab creation before aborting and closing it", async () => {
+    const { runtime, prepared, calls } = await setup({ tabDelay: 30 });
     const goblin = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => Boolean(goblin.workspaceCreateDone));
+    await waitUntil(() => Boolean(goblin.tabCreateDone));
     runtime.dismiss(goblin.name);
     await runtime.cleanup(goblin);
-    expect(calls.some((call) => call[1] === "workspace" && call[2] === "close")).toBe(true);
+    expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(true);
+    expect(calls.some((call) => call[1] === "workspace" && call[2] === "close")).toBe(false);
+  });
+
+  it("closes only the goblin pane when its tab contains another pane", async () => {
+    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000, tabPaneCount: 2 });
+    const goblin = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => Boolean(goblin.tab));
+    runtime.dismiss(goblin.name);
+    await runtime.cleanup(goblin);
+    expect(calls.some((call) => call[1] === "pane" && call[2] === "close")).toBe(true);
+    expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
   });
 
   it("memoizes shutdown without retaining the 65-second barrier after cleanup", async () => {

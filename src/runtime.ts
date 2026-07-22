@@ -19,7 +19,8 @@ import type {
   GoblinSettings,
   GoblinSnapshot,
   HerdrStatus,
-  OwnedWorkspace,
+  OwnedTab,
+  ParentHerdrContext,
   TerminalResult,
   ThinkingLevel,
 } from "./types.js";
@@ -56,6 +57,7 @@ export interface PrepareOptions {
 export interface RuntimeOptions {
   readonly settings: GoblinSettings;
   readonly bridgePath: string;
+  readonly parent: ParentHerdrContext;
   readonly runtimeRoot?: string;
   readonly runner?: CommandRunner;
   readonly prerequisites?: Prerequisites;
@@ -94,12 +96,8 @@ function internalAgentName(launchId: string): string {
   return `goblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
 }
 
-function identityMatches(agent: Record<string, unknown>, workspace: OwnedWorkspace): boolean {
-  return (
-    agent.workspace_id === workspace.workspaceId &&
-    agent.pane_id === workspace.paneId &&
-    agent.name === workspace.agentName
-  );
+function identityMatches(agent: Record<string, unknown>, tab: OwnedTab): boolean {
+  return agent.workspace_id === tab.workspaceId && agent.pane_id === tab.paneId && agent.name === tab.agentName;
 }
 
 export class GoblinRuntime {
@@ -119,8 +117,34 @@ export class GoblinRuntime {
       options.runtimeRoot ?? join(process.env.TMPDIR || "/tmp", `pi-goblins-${this.ownerId.slice(0, 8)}`);
   }
 
+  private async validateParent(): Promise<void> {
+    const { workspaceId, tabId, paneId } = this.options.parent;
+    const [workspaceResult, tabResult, paneResult] = await Promise.all([
+      this.command(["workspace", "get", workspaceId], undefined, 3_000),
+      this.command(["tab", "get", tabId], undefined, 3_000),
+      this.command(["pane", "get", paneId], undefined, 3_000),
+    ]);
+    const workspace = workspaceResult.workspace as Record<string, unknown> | undefined;
+    const tab = tabResult.tab as Record<string, unknown> | undefined;
+    const pane = paneResult.pane as Record<string, unknown> | undefined;
+    if (
+      workspaceResult.type !== "workspace_info" ||
+      workspace?.workspace_id !== workspaceId ||
+      tabResult.type !== "tab_info" ||
+      tab?.tab_id !== tabId ||
+      tab.workspace_id !== workspaceId ||
+      paneResult.type !== "pane_info" ||
+      pane?.pane_id !== paneId ||
+      pane.tab_id !== tabId ||
+      pane.workspace_id !== workspaceId
+    ) {
+      throw new Error("Inherited Herdr workspace, tab, and pane identity mismatch");
+    }
+  }
+
   async prepare(options: PrepareOptions): Promise<PreparedLaunch> {
     await this.prerequisites.check();
+    await this.validateParent();
     validateTask(options.task);
     const launchId = randomUUID();
     const runtimeDir = join(this.runtimeRoot, launchId);
@@ -221,14 +245,16 @@ export class GoblinRuntime {
 
     const remaining = () => deadline - Date.now();
     const label = `pi-goblin-${goblin.name}-${goblin.launchId}`;
-    let finishWorkspaceCreate!: () => void;
-    goblin.workspaceCreateDone = new Promise<void>((resolve) => (finishWorkspaceCreate = resolve));
-    let workspaceResult: Record<string, unknown>;
+    let finishTabCreate!: () => void;
+    goblin.tabCreateDone = new Promise<void>((resolve) => (finishTabCreate = resolve));
+    let tabResult: Record<string, unknown>;
     try {
-      workspaceResult = await this.command(
+      tabResult = await this.command(
         [
-          "workspace",
+          "tab",
           "create",
+          "--workspace",
+          this.options.parent.workspaceId,
           "--cwd",
           cwd,
           "--label",
@@ -243,21 +269,24 @@ export class GoblinRuntime {
         remaining(),
       );
     } finally {
-      finishWorkspaceCreate();
+      finishTabCreate();
     }
-    const workspace = workspaceResult.workspace as Record<string, unknown> | undefined;
-    const rootPane = workspaceResult.root_pane as Record<string, unknown> | undefined;
+    const tab = tabResult.tab as Record<string, unknown> | undefined;
+    const rootPane = tabResult.root_pane as Record<string, unknown> | undefined;
     if (
-      workspaceResult.type !== "workspace_created" ||
-      typeof workspace?.workspace_id !== "string" ||
-      workspace.label !== label ||
+      tabResult.type !== "tab_created" ||
+      typeof tab?.tab_id !== "string" ||
+      tab.workspace_id !== this.options.parent.workspaceId ||
+      tab.label !== label ||
       typeof rootPane?.pane_id !== "string" ||
-      rootPane.workspace_id !== workspace.workspace_id
+      rootPane.tab_id !== tab.tab_id ||
+      rootPane.workspace_id !== this.options.parent.workspaceId
     ) {
-      throw new Error("Malformed or identity-mismatched Herdr workspace creation response");
+      throw new Error("Malformed or identity-mismatched Herdr tab creation response");
     }
-    goblin.workspace = {
-      workspaceId: workspace.workspace_id,
+    goblin.tab = {
+      workspaceId: this.options.parent.workspaceId,
+      tabId: tab.tab_id,
       paneId: rootPane.pane_id,
       label,
       agentName: internalAgentName(goblin.launchId),
@@ -281,11 +310,11 @@ export class GoblinRuntime {
           [
             "agent",
             "start",
-            goblin.workspace.agentName,
+            goblin.tab.agentName,
             "--kind",
             "pi",
             "--pane",
-            goblin.workspace.paneId,
+            goblin.tab.paneId,
             "--timeout",
             String(Math.floor(left)),
             "--",
@@ -295,7 +324,7 @@ export class GoblinRuntime {
           left,
         );
         const agent = started.agent as Record<string, unknown> | undefined;
-        if (started.type !== "agent_started" || !agent || !identityMatches(agent, goblin.workspace)) {
+        if (started.type !== "agent_started" || !agent || !identityMatches(agent, goblin.tab)) {
           throw new Error("Herdr agent start identity mismatch");
         }
         break;
@@ -323,11 +352,11 @@ export class GoblinRuntime {
     if (remaining() <= 0) throw new Error("The shared launch deadline expired before prompting");
 
     const prompted = await this.command(
-      ["agent", "prompt", goblin.workspace.agentName, goblin.task, "--wait", "--until", "idle", "--until", "done"],
+      ["agent", "prompt", goblin.tab.agentName, goblin.task, "--wait", "--until", "idle", "--until", "done"],
       goblin.launchController.signal,
     );
     const promptAgent = prompted.agent as Record<string, unknown> | undefined;
-    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, goblin.workspace)) {
+    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, goblin.tab)) {
       throw new Error("Herdr prompt response identity mismatch");
     }
     goblin.promptSucceeded = true;
@@ -424,15 +453,14 @@ export class GoblinRuntime {
   }
 
   async refresh(goblin: Goblin): Promise<void> {
-    if (!goblin.workspace || goblin.status !== "running") return;
+    if (!goblin.tab || goblin.status !== "running") return;
     if (goblin.refreshedAt && Date.now() - goblin.refreshedAt < REFRESH_CACHE_MS) return;
     if (goblin.refreshPromise) return goblin.refreshPromise;
     goblin.refreshPromise = (async () => {
       try {
-        const result = await this.command(["agent", "get", goblin.workspace?.agentName ?? ""]);
+        const result = await this.command(["agent", "get", goblin.tab?.agentName ?? ""]);
         const agent = result.agent as Record<string, unknown> | undefined;
-        if (result.type !== "agent_info" || !agent || !goblin.workspace || !identityMatches(agent, goblin.workspace))
-          return;
+        if (result.type !== "agent_info" || !agent || !goblin.tab || !identityMatches(agent, goblin.tab)) return;
         if (["idle", "working", "blocked", "done", "unknown"].includes(String(agent.agent_status))) {
           goblin.herdrStatus = agent.agent_status as HerdrStatus;
         }
@@ -459,40 +487,64 @@ export class GoblinRuntime {
   cleanup(goblin: Goblin): Promise<void> {
     if (goblin.cleanup) return goblin.cleanup;
     goblin.cleanup = (async () => {
-      await goblin.workspaceCreateDone?.catch(() => {});
+      await goblin.tabCreateDone?.catch(() => {});
       goblin.launchController.abort();
       await goblin.launchPromise?.catch(() => {});
-      const workspace = goblin.workspace;
-      if (workspace) {
-        let owned = false;
-        let live = false;
+      const tab = goblin.tab;
+      if (tab) {
         try {
-          const result = await this.command(["workspace", "get", workspace.workspaceId], undefined, 3_000);
-          const value = result.workspace as Record<string, unknown> | undefined;
-          owned =
-            result.type === "workspace_info" &&
-            value?.workspace_id === workspace.workspaceId &&
-            value?.label === workspace.label;
-          if (owned) {
+          const paneResult = await this.command(["pane", "get", tab.paneId], undefined, 3_000);
+          const paneValue = paneResult.pane as Record<string, unknown> | undefined;
+          const paneOwned =
+            paneResult.type === "pane_info" &&
+            paneValue?.pane_id === tab.paneId &&
+            paneValue.tab_id === tab.tabId &&
+            paneValue.workspace_id === tab.workspaceId;
+          if (paneOwned) {
+            let live = false;
             try {
-              const agentResult = await this.command(["agent", "get", workspace.agentName], undefined, 2_000);
+              const agentResult = await this.command(["agent", "get", tab.agentName], undefined, 2_000);
               const agent = agentResult.agent as Record<string, unknown> | undefined;
               live = Boolean(
-                agent &&
-                  identityMatches(agent, workspace) &&
-                  agent.agent_status !== "idle" &&
-                  agent.agent_status !== "done",
+                agent && identityMatches(agent, tab) && agent.agent_status !== "idle" && agent.agent_status !== "done",
               );
             } catch {}
             if (live) {
-              await this.command(["agent", "send-keys", workspace.agentName, "esc"], undefined, 2_000).catch(() => {});
+              await this.command(["agent", "send-keys", tab.agentName, "esc"], undefined, 2_000).catch(() => {});
               await this.command(
-                ["agent", "wait", workspace.agentName, "--until", "idle", "--until", "done", "--timeout", "2000"],
+                ["agent", "wait", tab.agentName, "--until", "idle", "--until", "done", "--timeout", "2000"],
                 undefined,
                 3_000,
               ).catch(() => {});
             }
-            await this.command(["workspace", "close", workspace.workspaceId], undefined, 5_000).catch(() => {});
+            const [currentTabResult, currentPaneResult, parentTabResult] = await Promise.all([
+              this.command(["tab", "get", tab.tabId], undefined, 3_000),
+              this.command(["pane", "get", tab.paneId], undefined, 3_000),
+              this.command(["tab", "get", this.options.parent.tabId], undefined, 3_000),
+            ]);
+            const currentTab = currentTabResult.tab as Record<string, unknown> | undefined;
+            const currentPane = currentPaneResult.pane as Record<string, unknown> | undefined;
+            const parentTab = parentTabResult.tab as Record<string, unknown> | undefined;
+            const parentStillOwned =
+              parentTabResult.type === "tab_info" &&
+              parentTab?.tab_id === this.options.parent.tabId &&
+              parentTab.workspace_id === tab.workspaceId;
+            const paneStillOwned =
+              currentPaneResult.type === "pane_info" &&
+              currentPane?.pane_id === tab.paneId &&
+              currentPane.tab_id === tab.tabId &&
+              currentPane.workspace_id === tab.workspaceId;
+            const tabStillExclusive =
+              currentTabResult.type === "tab_info" &&
+              currentTab?.tab_id === tab.tabId &&
+              currentTab.workspace_id === tab.workspaceId &&
+              currentTab.label === tab.label &&
+              currentTab.pane_count === 1;
+            if (parentStillOwned && paneStillOwned && tabStillExclusive) {
+              await this.command(["tab", "close", tab.tabId], undefined, 5_000).catch(() => {});
+            } else if (parentStillOwned && paneStillOwned) {
+              await this.command(["pane", "close", tab.paneId], undefined, 5_000).catch(() => {});
+            }
           }
         } catch {}
       }

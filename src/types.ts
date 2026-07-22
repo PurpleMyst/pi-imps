@@ -23,8 +23,15 @@ export interface GoblinSnapshot {
   readonly herdrStatus?: HerdrStatus;
 }
 
-export interface OwnedWorkspace {
+export interface ParentHerdrContext {
   readonly workspaceId: string;
+  readonly tabId: string;
+  readonly paneId: string;
+}
+
+export interface OwnedTab {
+  readonly workspaceId: string;
+  readonly tabId: string;
   readonly paneId: string;
   readonly label: string;
   readonly agentName: string;
@@ -49,14 +56,14 @@ export interface Goblin extends GoblinSnapshot {
   activity?: string;
   herdrStatus?: HerdrStatus;
   completedAt?: number;
-  workspace?: OwnedWorkspace;
+  tab?: OwnedTab;
   bridgeReady?: boolean;
   bridgeResult?: TerminalResult;
   promptSucceeded?: boolean;
   coordinationTimer?: ReturnType<typeof setTimeout>;
   refreshPromise?: Promise<void>;
   refreshedAt?: number;
-  workspaceCreateDone?: Promise<void>;
+  tabCreateDone?: Promise<void>;
   launchPromise?: Promise<void>;
   cleanup?: Promise<void>;
 }

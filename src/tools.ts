@@ -38,7 +38,7 @@ export function summonTool(
     name: "summon",
     label: "Summon Goblin",
     description:
-      "Summon a goblin in a Herdr-owned Pi workspace. Returns immediately after deterministic checks with a name; use wait to collect the result.",
+      "Summon a goblin in a new tab of the parent Pi instance's Herdr workspace. Returns immediately after deterministic checks with a name; use wait to collect the result.",
     promptSnippet: "Summon a goblin for background task delegation",
     promptGuidelines: ["You can summon multiple goblins in parallel, then use wait with mode all or first."],
     parameters: SummonParams,

@@ -2,7 +2,7 @@
 
 ## Goal and supported versions
 
-Each goblin is a Pi process and PTY owned by Herdr. The extension preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_goblins`; named-agent selection and all named-agent configuration are removed.
+Each goblin is a Pi process and PTY owned by Herdr in a dedicated tab of the parent Pi instance's workspace. The extension registers nothing unless the parent runs inside Herdr. It preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_goblins`; named-agent selection and all named-agent configuration are removed.
 
 Required versions:
 
@@ -25,18 +25,20 @@ The initial release guarantees cooperative cleanup. Recovery after a hard parent
 
 ## Goblin resources and identities
 
+The extension returns before registering tools, hooks, prompt text, or UI unless `HERDR_ENV=1` and `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` are non-empty. It also returns whenever `PI_GOBLINS_CHILD=1`. The inherited Herdr identity is captured once during registration; first-summon preflight verifies that the workspace, tab, and pane still exist and agree.
+
 Each goblin has:
 
 - a public in-memory record and generated public name;
 - a random owner ID, launch ID, nonce, and lowercase Herdr agent name;
-- a uniquely labelled `pi-goblin-<public-name>-<launch-id>` workspace;
+- a uniquely labelled `pi-goblin-<public-name>-<launch-id>` tab in the parent workspace;
 - a private mode-0700 runtime directory, mode-0600 manifest, and Unix socket;
 - the child bridge extension; and
 - an idempotent memoized cleanup promise.
 
-Public and Herdr identities are separate. Workspace and agent responses are accepted only when their recorded workspace, pane, label, and internal agent identity match the goblin.
+The parent workspace is borrowed and is never closed. Public and Herdr identities are separate. Tab, pane, and agent responses are accepted only when their recorded workspace, tab, pane, label, and internal agent identity match the goblin.
 
-Herdr starts the workspace with `PI_GOBLINS_CHILD=1` and `PI_GOBLINS_MANIFEST=<absolute path>`. When `PI_GOBLINS_CHILD=1`, the main extension returns before registering any tools, hooks, prompt text, or UI. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
+Herdr starts the tab with `PI_GOBLINS_CHILD=1` and `PI_GOBLINS_MANIFEST=<absolute path>`. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
 
 ## Prerequisites and deterministic validation
 
@@ -59,6 +61,7 @@ Successful preflight is cached. A later Herdr version, protocol, integration, so
 
 Before allocating a public name, the extension validates:
 
+- the captured parent workspace, tab, and pane still exist and agree;
 - no NUL in the task and at most 64 KiB UTF-8;
 - absolute runtime paths and a portable Unix-socket path bound;
 - model resolution and policy;
@@ -84,9 +87,9 @@ Every child also receives `--exclude-tools summon,wait,dismiss,list_goblins`, `-
 
 ## Launch and prompting
 
-The parent creates the socket listener before the workspace. It creates one Herdr workspace rooted at the parent's cwd, then invokes `herdr agent start` with argument arrays, `--kind pi`, the root pane, and child Pi arguments.
+The parent creates the socket listener before the tab. It creates one unfocused Herdr tab in the captured parent workspace, rooted at the parent's cwd, then invokes `herdr agent start` with argument arrays, `--kind pi`, the tab's root pane, and child Pi arguments.
 
-Workspace creation, interactive agent start, and authenticated bridge readiness share one absolute 60-second deadline. `agent start` retries only `agent_pane_busy`, every 250 ms, for at most five seconds and never beyond the shared deadline. Herdr's start timeout must remain greater than 3000 ms; launch fails rather than extending the deadline.
+Tab creation, interactive agent start, and authenticated bridge readiness share one absolute 60-second deadline. `agent start` retries only `agent_pane_busy`, every 250 ms, for at most five seconds and never beyond the shared deadline. Herdr's start timeout must remain greater than 3000 ms; launch fails rather than extending the deadline.
 
 The task is not a Pi startup argument. After both Herdr interactive readiness and bridge `ready`, the parent submits:
 
@@ -137,13 +140,15 @@ Cleanup is memoized and idempotent:
 1. abort active Herdr CLI commands;
 2. send `esc` only to an identity-matched live agent;
 3. briefly wait for idle or disappearance;
-4. close only the identity-matched owned workspace;
+4. close only the identity-matched owned tab;
 5. close the socket;
 6. remove the runtime directory.
 
+Before closing a tab, cleanup verifies its workspace, tab ID, label, root pane, and single-pane ownership. If exclusive ownership no longer holds, it closes only the identity-matched original pane when safe; otherwise it leaves the modified layout intact. It never closes the parent workspace.
+
 Cleanup promises are tracked independently of the public map. Cooperative shutdown uses one shared promise and one absolute 65-second barrier for quit, reload, new/resume, fork/clone, and other session replacement flows. The extension never stops the Herdr server.
 
-A hard parent crash can leave workspaces. Identify labels beginning `pi-goblin-` with `herdr workspace list`, inspect them, and close the relevant ID with `herdr workspace close <id>`. Automatic orphan reconciliation is deliberately deferred.
+A hard parent crash can leave tabs. Identify labels beginning `pi-goblin-` with `herdr tab list --workspace <id>`, inspect them, and close the relevant ID with `herdr tab close <id>`. Automatic orphan reconciliation is deliberately deferred.
 
 ## Verification
 

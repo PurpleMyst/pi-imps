@@ -3,13 +3,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { GoblinRuntime } from "./runtime.js";
 import { loadGoblinSettings } from "./settings.js";
 import { dismissTool, listGoblinsTool, summonTool, waitTool } from "./tools.js";
+import type { ParentHerdrContext } from "./types.js";
 
 export default function piGoblins(pi: ExtensionAPI): void {
-  if (process.env.PI_GOBLINS_CHILD === "1") return;
+  const workspaceId = process.env.HERDR_WORKSPACE_ID;
+  const tabId = process.env.HERDR_TAB_ID;
+  const paneId = process.env.HERDR_PANE_ID;
+  if (process.env.PI_GOBLINS_CHILD === "1" || process.env.HERDR_ENV !== "1" || !workspaceId || !tabId || !paneId)
+    return;
 
+  const parent: ParentHerdrContext = { workspaceId, tabId, paneId };
   const runtime = new GoblinRuntime({
     settings: loadGoblinSettings(),
     bridgePath: fileURLToPath(new URL("./child-bridge.ts", import.meta.url)),
+    parent,
   });
 
   const updateStatus = (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) => {

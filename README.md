@@ -15,7 +15,7 @@ Install the Herdr integration separately:
 herdr integration install pi
 ```
 
-pi-goblins checks prerequisites on the first summon in each parent session. It never installs or updates Herdr or Pi automatically.
+pi-goblins only registers its tools when Pi is running inside an identified Herdr pane. It checks prerequisites and validates the inherited workspace identity on summon. It never installs or updates Herdr or Pi automatically.
 
 ## Installation
 
@@ -27,7 +27,7 @@ pi install npm:pi-goblins
 
 | Tool | Behavior |
 | --- | --- |
-| `summon` | Start one direct task in a new Herdr-owned Pi workspace. Optional `model` and `thinking` overrides. Returns a generated name without waiting for launch or completion. |
+| `summon` | Start one direct task in a new tab of the parent Pi instance's Herdr workspace. Optional `model` and `thinking` overrides. Returns a generated name without waiting for launch or completion. |
 | `wait` | Collect terminal results with `mode: "all"` or `"first"`; optionally filter by names. `first` does not cancel other goblins. |
 | `dismiss` | Remove and clean a running or terminal uncollected goblin by name, or use `"all"`. |
 | `list_goblins` | Refresh and display current state without collecting results. |
@@ -41,7 +41,7 @@ wait({ mode: "first" })
 wait({ mode: "all" })
 ```
 
-Each goblin is a leaf worker. The child receives `--exclude-tools summon,wait,dismiss,list_goblins`, and the main pi-goblins extension disables itself whenever `PI_GOBLINS_CHILD=1`.
+Each goblin is a leaf worker. The child receives `--exclude-tools summon,wait,dismiss,list_goblins`, and the main pi-goblins extension disables itself whenever `PI_GOBLINS_CHILD=1`. Outside Herdr it also remains inactive and registers nothing.
 
 ## Results
 
@@ -76,19 +76,19 @@ Named agents, agent frontmatter, `additionalExtensions`, per-agent grants, and p
 
 ## Lifecycle and cleanup
 
-Each goblin uses a private Unix socket and runtime directory plus a workspace labelled:
+Each goblin uses a private Unix socket and runtime directory plus a tab in the parent workspace labelled:
 
 ```text
 pi-goblin-<public-name>-<full-launch-id>
 ```
 
-Collection can finish before asynchronous workspace cleanup, but cooperative Pi shutdown waits for tracked cleanup. pi-goblins never stops the Herdr server and never closes a workspace whose recorded identity does not match.
+Collection can finish before asynchronous tab cleanup, but cooperative Pi shutdown waits for tracked cleanup. pi-goblins never stops the Herdr server or closes the parent workspace. It closes a tab only while its recorded workspace, tab, pane, label, and exclusive ownership still match.
 
-A hard parent crash or power loss may leave a workspace. Automatic orphan recovery is deferred. To clean one manually:
+A hard parent crash or power loss may leave a tab. Automatic orphan recovery is deferred. To clean one manually:
 
 ```bash
-herdr workspace list
-herdr workspace close <workspace-id>
+herdr tab list --workspace <workspace-id>
+herdr tab close <tab-id>
 ```
 
 Only close labels beginning `pi-goblin-` after confirming they belong to abandoned work.

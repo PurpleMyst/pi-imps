@@ -15,7 +15,7 @@ const MODEL_ID = process.env.PI_GOBLINS_LIVE_MODEL;
 const BRIDGE_PATH = fileURLToPath(new URL("../src/child-bridge.ts", import.meta.url));
 const runtimes: GoblinRuntime[] = [];
 const roots: string[] = [];
-const ownedWorkspaces = new Map<string, string>();
+const ownedTabs = new Map<string, string>();
 
 function liveModel(): Model<Api> {
   const separator = MODEL_ID?.indexOf("/") ?? -1;
@@ -27,11 +27,20 @@ function liveModel(): Model<Api> {
   return { provider, id, name: id } as Model<Api>;
 }
 
+function parentContext() {
+  const workspaceId = process.env.HERDR_WORKSPACE_ID;
+  const tabId = process.env.HERDR_TAB_ID;
+  const paneId = process.env.HERDR_PANE_ID;
+  if (!workspaceId || !tabId || !paneId) throw new Error("Live tests must run inside a Herdr pane");
+  return { workspaceId, tabId, paneId };
+}
+
 async function makeRuntime(toolAllowlist: string[] | undefined): Promise<{ runtime: GoblinRuntime; root: string }> {
   const root = await mkdtemp(join(tmpdir(), "pi-goblins-live-"));
   const runtime = new GoblinRuntime({
     settings: { turnLimit: 10, toolAllowlist, modelPatterns: undefined },
     bridgePath: BRIDGE_PATH,
+    parent: parentContext(),
     runtimeRoot: join(root, "runtime"),
   });
   roots.push(root);
@@ -50,24 +59,24 @@ async function summon(runtime: GoblinRuntime, root: string, task: string): Promi
     modelRegistry: { getAvailable: () => [model] } as ModelRegistry,
   });
   const goblin = runtime.summon(prepared, root);
-  await waitUntil(() => Boolean(goblin.workspace), 65_000, "Herdr workspace creation");
-  const workspace = goblin.workspace;
-  if (!workspace) throw new Error("Goblin did not record its Herdr workspace");
-  ownedWorkspaces.set(workspace.workspaceId, workspace.label);
+  await waitUntil(() => Boolean(goblin.tab), 65_000, "Herdr tab creation");
+  const tab = goblin.tab;
+  if (!tab) throw new Error("Goblin did not record its Herdr tab");
+  ownedTabs.set(tab.tabId, tab.label);
   return goblin;
 }
 
-async function workspaceExists(workspaceId: string, label: string): Promise<boolean> {
-  const result = await herdr(["workspace", "list"]);
-  const workspaces = result.workspaces;
+async function tabExists(tabId: string, label: string): Promise<boolean> {
+  const result = await herdr(["tab", "list", "--workspace", parentContext().workspaceId]);
+  const tabs = result.tabs;
   return (
-    Array.isArray(workspaces) &&
-    workspaces.some(
-      (workspace) =>
-        typeof workspace === "object" &&
-        workspace !== null &&
-        (workspace as Record<string, unknown>).workspace_id === workspaceId &&
-        (workspace as Record<string, unknown>).label === label,
+    Array.isArray(tabs) &&
+    tabs.some(
+      (tab) =>
+        typeof tab === "object" &&
+        tab !== null &&
+        (tab as Record<string, unknown>).tab_id === tabId &&
+        (tab as Record<string, unknown>).label === label,
     )
   );
 }
@@ -102,37 +111,36 @@ async function waitForResult(goblin: Goblin): Promise<void> {
 }
 
 async function assertCleaned(goblin: Goblin): Promise<void> {
-  const workspace = goblin.workspace;
-  if (!workspace) throw new Error("Goblin did not create a workspace");
-  await waitUntil(
-    async () => !(await workspaceExists(workspace.workspaceId, workspace.label)),
-    15_000,
-    `workspace ${workspace.workspaceId} cleanup`,
-  );
-  ownedWorkspaces.delete(workspace.workspaceId);
+  const tab = goblin.tab;
+  if (!tab) throw new Error("Goblin did not create a tab");
+  await waitUntil(async () => !(await tabExists(tab.tabId, tab.label)), 15_000, `tab ${tab.tabId} cleanup`);
+  ownedTabs.delete(tab.tabId);
 }
 
 beforeAll(() => {
-  if (LIVE) liveModel();
+  if (LIVE) {
+    liveModel();
+    parentContext();
+  }
 });
 
 afterEach(async () => {
   const cleanupErrors: unknown[] = [];
   const shutdowns = await Promise.allSettled(runtimes.splice(0).map((runtime) => runtime.shutdown()));
   cleanupErrors.push(...shutdowns.filter((result) => result.status === "rejected").map((result) => result.reason));
-  for (const [workspaceId, label] of ownedWorkspaces) {
-    if (await workspaceExists(workspaceId, label).catch(() => false)) {
-      cleanupErrors.push(new Error(`Automatic cleanup left Herdr workspace ${workspaceId} (${label})`));
-      await herdr(["workspace", "close", workspaceId]);
+  for (const [tabId, label] of ownedTabs) {
+    if (await tabExists(tabId, label).catch(() => false)) {
+      cleanupErrors.push(new Error(`Automatic cleanup left Herdr tab ${tabId} (${label})`));
+      await herdr(["tab", "close", tabId]);
     }
-    ownedWorkspaces.delete(workspaceId);
+    ownedTabs.delete(tabId);
   }
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Live Herdr cleanup failed");
 });
 
 describe.skipIf(!LIVE)("live Herdr integration", () => {
-  it("runs a no-tool Pi child through a real Herdr workspace and bridge", async () => {
+  it("runs a no-tool Pi child through a real Herdr tab and bridge", async () => {
     const { runtime, root } = await makeRuntime([]);
     const token = `pi-goblins-no-tool-${randomUUID()}`;
     const forbiddenPath = join(root, "no-tool-proof.txt");
@@ -141,9 +149,9 @@ describe.skipIf(!LIVE)("live Herdr integration", () => {
       root,
       `Try to use the write tool to create ${forbiddenPath} containing ${token}, then explain the outcome.`,
     );
-    const workspace = goblin.workspace;
-    expect(workspace).toBeDefined();
-    expect(await workspaceExists(workspace?.workspaceId ?? "", workspace?.label ?? "")).toBe(true);
+    const tab = goblin.tab;
+    expect(tab).toBeDefined();
+    expect(await tabExists(tab?.tabId ?? "", tab?.label ?? "")).toBe(true);
 
     await waitForResult(goblin);
     expect({ status: goblin.status, error: goblin.error }).toEqual({ status: "completed", error: undefined });
@@ -174,16 +182,16 @@ describe.skipIf(!LIVE)("live Herdr integration", () => {
     await assertCleaned(goblin);
   }, 150_000);
 
-  it("dismisses and closes a real in-flight Herdr workspace", async () => {
+  it("dismisses and closes a real in-flight Herdr tab", async () => {
     const { runtime, root } = await makeRuntime([]);
     const goblin = await summon(
       runtime,
       root,
       "Write a very detailed twenty-section explanation of distributed consensus, pausing to reason carefully.",
     );
-    const workspace = goblin.workspace;
-    expect(workspace).toBeDefined();
-    expect(await workspaceExists(workspace?.workspaceId ?? "", workspace?.label ?? "")).toBe(true);
+    const tab = goblin.tab;
+    expect(tab).toBeDefined();
+    expect(await tabExists(tab?.tabId ?? "", tab?.label ?? "")).toBe(true);
 
     expect(runtime.dismiss(goblin.name)).toEqual([goblin.name]);
     expect(goblin.status).toBe("dismissed");
