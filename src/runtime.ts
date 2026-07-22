@@ -91,7 +91,7 @@ function immutableSnapshot(goblin: Goblin): GoblinSnapshot {
 }
 
 function internalAgentName(launchId: string): string {
-  return `pigoblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
+  return `goblin-${launchId.replace(/-/g, "").slice(0, 24)}`;
 }
 
 function identityMatches(agent: Record<string, unknown>, workspace: OwnedWorkspace): boolean {
