@@ -31,6 +31,7 @@ interface FakeOptions {
   promptIdentityMismatch?: boolean;
   malformedTabCreation?: boolean;
   tabPaneCount?: number;
+  stalledRefresh?: boolean;
 }
 
 async function setup(options: FakeOptions = {}) {
@@ -41,6 +42,7 @@ async function setup(options: FakeOptions = {}) {
   let identity = { workspace_id: "w1", pane_id: "w1:p2", name: "" };
   const calls: string[][] = [];
   let starts = 0;
+  let refreshAborted = false;
   const runner: CommandRunner = async (command, args, commandOptions) => {
     calls.push([command, ...args]);
     if (command === "herdr" && args[0] === "--version") return { stdout: "herdr 0.7.5\n", stderr: "", code: 0 };
@@ -138,8 +140,21 @@ async function setup(options: FakeOptions = {}) {
     }
     if (args[0] === "pane" && args[1] === "get" && args[2] === "w1:p2")
       return envelope({ type: "pane_info", pane: { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" } });
-    if (args[0] === "agent" && args[1] === "get")
+    if (args[0] === "agent" && args[1] === "get") {
+      if (options.stalledRefresh && commandOptions?.signal) {
+        return new Promise((_, reject) => {
+          commandOptions?.signal?.addEventListener(
+            "abort",
+            () => {
+              refreshAborted = true;
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        });
+      }
       return envelope({ type: "agent_info", agent: { ...identity, agent_status: "idle" } });
+    }
     return envelope({ type: "ok" });
   };
   const runtime = new GoblinRuntime({
@@ -160,7 +175,7 @@ async function setup(options: FakeOptions = {}) {
       modelRegistry: registry,
     });
   const prepared = await prepare();
-  return { runtime, prepared, prepare, calls };
+  return { runtime, prepared, prepare, calls, wasRefreshAborted: () => refreshAborted };
 }
 
 async function waitUntil(predicate: () => boolean, timeout = 1000): Promise<void> {
@@ -286,6 +301,23 @@ describe("GoblinRuntime lifecycle", () => {
     await runtime.shutdown();
     expect(calls.some((call) => call[1] === "pane" && call[2] === "close")).toBe(true);
     expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
+  });
+
+  it("cancels an in-flight display refresh during dismissal", async () => {
+    const { runtime, prepared, calls, wasRefreshAborted } = await setup({
+      promptDelay: 10_000,
+      stalledRefresh: true,
+    });
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    const refresh = runtime.refreshAll([name]);
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "get"));
+
+    runtime.dismiss(name);
+
+    await expect(refresh).resolves.toBeUndefined();
+    expect(wasRefreshAborted()).toBe(true);
+    await runtime.shutdown();
   });
 
   it("memoizes shutdown without retaining the 65-second barrier after cleanup", async () => {

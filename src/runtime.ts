@@ -440,7 +440,9 @@ export class GoblinRuntime {
   private async refresh(record: GoblinRecord): Promise<void> {
     await record.refresh(REFRESH_CACHE_MS, async (tab) => {
       try {
-        const agent = parseAgentInfo(await this.command(["agent", "get", tab.agentName]));
+        const agent = parseAgentInfo(
+          await this.command(["agent", "get", tab.agentName], record.launchController.signal, 3_000),
+        );
         if (agent && identityMatches(agent, tab)) return agent.agentStatus;
       } catch {
         // Display-only refresh never settles a goblin.
