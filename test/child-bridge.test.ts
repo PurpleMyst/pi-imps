@@ -131,12 +131,21 @@ describe("child bridge", () => {
     });
   });
 
-  it("steers before the final turn and drains truncated result before aborting", async () => {
-    const harness = await createHarness(2);
+  it("steers with ten turns remaining and drains the truncated result before aborting", async () => {
+    const harness = await createHarness(12);
     const abort = vi.fn();
     await harness.handlers.get("turn_end")?.({ message: assistant(["first"]) }, { abort });
-    expect(harness.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("FINAL TURN"), { deliverAs: "steer" });
+    expect(harness.sendUserMessage).not.toHaveBeenCalled();
 
+    await harness.handlers.get("turn_end")?.({ message: assistant(["second"]) }, { abort });
+    expect(harness.sendUserMessage).toHaveBeenCalledOnce();
+    expect(harness.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("10 TURNS REMAIN"), {
+      deliverAs: "steer",
+    });
+
+    for (let turn = 3; turn < 12; turn++) {
+      await harness.handlers.get("turn_end")?.({ message: assistant([`turn ${turn}`]) }, { abort });
+    }
     await harness.handlers.get("turn_end")?.({ message: assistant(["final"]) }, { abort });
     expect(abort).toHaveBeenCalledOnce();
     await eventually(() => harness.messages.some((message) => message.type === "result"));
@@ -145,8 +154,8 @@ describe("child bridge", () => {
       output: "final",
     });
     expect(harness.messages.filter((message) => message.type === "turn").at(-1)).toMatchObject({
-      turns: 2,
-      tokens: { input: 6, output: 10 },
+      turns: 12,
+      tokens: { input: 36, output: 60 },
     });
   });
 });

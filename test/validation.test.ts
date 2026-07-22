@@ -14,7 +14,7 @@ function model(provider: string, id: string, name = id): Model<Api> {
   return { provider, id, name } as Model<Api>;
 }
 
-const defaults = { turnLimit: 30, toolAllowlist: undefined, modelPatterns: undefined };
+const defaults = { turnLimit: 50, toolAllowlist: undefined, modelPatterns: undefined };
 
 describe("settings policy", () => {
   it("distinguishes absent allowlists from explicit empty allowlists", () => {

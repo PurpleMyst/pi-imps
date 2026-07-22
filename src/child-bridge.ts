@@ -5,8 +5,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseChildManifest } from "./bridge-protocol.js";
 import type { ChildEvent, TerminalResult } from "./types.js";
 
-const FINAL_TURN_DIRECTIVE =
-  "FINAL TURN. Do not start new work. Save any pending changes, commit your progress, and respond with: (1) what you completed, (2) what remains unfinished.";
+const WRAP_UP_DIRECTIVE =
+  "10 TURNS REMAIN. Stop expanding scope. Prioritize completing the requested work, running verification, and committing finished changes. If everything cannot be completed, leave the working tree coherent and report what remains.";
 
 function assistantText(message: AssistantMessage): string {
   return message.content
@@ -83,7 +83,7 @@ export default function childBridge(pi: ExtensionAPI): void {
       tokens.output += event.message.usage.output;
     }
     await send({ type: "turn", turns, tokens: { ...tokens } });
-    if (turns === manifest.turnLimit - 1) pi.sendUserMessage(FINAL_TURN_DIRECTIVE, { deliverAs: "steer" });
+    if (turns === manifest.turnLimit - 10) pi.sendUserMessage(WRAP_UP_DIRECTIVE, { deliverAs: "steer" });
     if (turns >= manifest.turnLimit) {
       await sendResult({ status: "truncated", output: latest ? assistantText(latest) : "" });
       ctx.abort();

@@ -4,7 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { GoblinSettings } from "./types.js";
 
 const DEFAULTS: GoblinSettings = {
-  turnLimit: 30,
+  turnLimit: 50,
   toolAllowlist: undefined,
   modelPatterns: undefined,
 };

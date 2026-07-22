@@ -74,7 +74,7 @@ The bridge enforces fatal UTF-8 decoding, 64-KiB telemetry and 16-MiB result lim
 
 The first valid result is authoritative and terminalizes immediately. A later prompt failure cannot replace it. A prompt failure fails only a still-running record. Prompt success while still running starts a one-second missing-result grace period, after which the record fails if the child did not publish a result.
 
-At turn `limit - 1`, the child steers a final-turn directive. At the limit it publishes a `truncated` result before calling Pi's supported abort API.
+At turn `limit - 10`, the child steers a wrap-up directive that prioritizes completion, verification, and committing finished changes. At the limit it publishes a `truncated` result before calling Pi's supported abort API.
 
 ## Herdr status
 

@@ -19,7 +19,7 @@ afterEach(() => {
 describe("loadGoblinSettings", () => {
   it("returns defaults when goblins.json is absent", () => {
     expect(loadGoblinSettings(agentDir())).toEqual({
-      turnLimit: 30,
+      turnLimit: 50,
       toolAllowlist: undefined,
       modelPatterns: undefined,
     });
@@ -49,7 +49,7 @@ describe("loadGoblinSettings", () => {
     const root = agentDir();
     writeFileSync(join(root, "goblins.json"), JSON.stringify(["unexpected"]));
     expect(loadGoblinSettings(root)).toEqual({
-      turnLimit: 30,
+      turnLimit: 50,
       toolAllowlist: undefined,
       modelPatterns: undefined,
     });

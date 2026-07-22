@@ -58,7 +58,7 @@ Global configuration lives at `~/.pi/agent/goblins.json`:
 ```json
 {
   "$schema": "https://github.com/Jomik/pi-goblins/blob/main/goblins.schema.json",
-  "turnLimit": 30,
+  "turnLimit": 50,
   "toolAllowlist": ["read", "edit", "bash", "write", "web_search"],
   "modelPatterns": ["anthropic/*", "openai/gpt-5.6-*"]
 }
@@ -66,7 +66,7 @@ Global configuration lives at `~/.pi/agent/goblins.json`:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `turnLimit` | `30` | Assistant-turn circuit breaker; minimum 2 |
+| `turnLimit` | `50` | Assistant-turn circuit breaker; a wrap-up warning is sent with 10 turns remaining; minimum 2 |
 | `toolAllowlist` | omitted | Omitted keeps Pi's normal tool selection; `[]` passes `--no-tools`; a non-empty list passes `--tools` |
 | `modelPatterns` | omitted | Case-sensitive whole canonical `provider/model` globs using `*` and `?`; `[]` denies all models |
 
