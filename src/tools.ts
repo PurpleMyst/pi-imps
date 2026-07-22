@@ -3,7 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatGoblinStatusDisplay, formatSummonCall, formatWaitDisplay } from "./display.js";
 import type { GoblinRuntime } from "./runtime.js";
-import type { Goblin, GoblinSnapshot, ThinkingLevel } from "./types.js";
+import type { GoblinSnapshot, ThinkingLevel } from "./types.js";
 
 function goblinJson(goblin: GoblinSnapshot): Record<string, unknown> {
   return {
@@ -52,10 +52,10 @@ export function summonTool(
           parentModel: ctx.model,
           modelRegistry: ctx.modelRegistry,
         });
-        const goblin = runtime.summon(prepared, ctx.cwd);
+        const name = runtime.summon(prepared, ctx.cwd);
         return {
-          content: [{ type: "text", text: JSON.stringify({ name: goblin.name }) }],
-          details: { name: goblin.name },
+          content: [{ type: "text", text: JSON.stringify({ name }) }],
+          details: { name },
         };
       } catch (error) {
         return {
@@ -100,17 +100,6 @@ const WaitParams = Type.Object({
   names: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 
-function aborted(signal: AbortSignal | undefined): Promise<"aborted"> | undefined {
-  if (!signal) return undefined;
-  return new Promise((resolve) => {
-    if (signal.aborted) resolve("aborted");
-    else signal.addEventListener("abort", () => resolve("aborted"), { once: true });
-  });
-}
-
-function eligible(runtime: GoblinRuntime, names: Set<string> | undefined): Goblin[] {
-  return [...runtime.goblins.values()].filter((goblin) => !names || names.has(goblin.name));
-}
 
 export function waitTool(
   runtime: GoblinRuntime,
@@ -125,51 +114,21 @@ export function waitTool(
     ],
     parameters: WaitParams,
     async execute(_id, params, signal, onUpdate): Promise<AgentToolResult<{ goblins: GoblinSnapshot[] }>> {
-      const names = params.names ? new Set(params.names) : undefined;
-      let waiting = eligible(runtime, names);
-      if (waiting.length === 0) {
+      if (!runtime.hasEligible(params.names)) {
         return { content: [{ type: "text", text: "No uncollected goblins to wait for." }], details: { goblins: [] } };
       }
-      const abortPromise = aborted(signal);
       const emit = () => {
-        waiting = eligible(runtime, names);
-        void runtime.refreshAll(waiting);
+        const snapshots = runtime.snapshots(params.names);
+        void runtime.refreshAll(params.names);
         onUpdate?.({
-          content: [{ type: "text", text: JSON.stringify(waiting.map((goblin) => goblinJson(goblin))) }],
-          details: { goblins: runtime.snapshots().filter((snapshot) => !names || names.has(snapshot.name)) },
+          content: [{ type: "text", text: JSON.stringify(snapshots.map(goblinJson)) }],
+          details: { goblins: snapshots },
         });
       };
       emit();
       const interval = setInterval(emit, 200);
       try {
-        const claimed: GoblinSnapshot[] = [];
-        if (params.mode === "all") {
-          const outcome = await Promise.race([
-            Promise.all(waiting.map((goblin) => goblin.done)).then(() => "done" as const),
-            ...(abortPromise ? [abortPromise] : []),
-          ]);
-          if (outcome === "aborted" || signal?.aborted) return thisResult([]);
-          for (const goblin of waiting) {
-            const snapshot = runtime.claim(goblin);
-            if (snapshot && snapshot.status !== "dismissed") claimed.push(snapshot);
-          }
-        } else {
-          for (;;) {
-            waiting = eligible(runtime, names);
-            if (waiting.length === 0) break;
-            const outcome = await Promise.race([
-              ...waiting.map((goblin) => goblin.done.then(() => goblin)),
-              ...(abortPromise ? [abortPromise] : []),
-            ]);
-            if (outcome === "aborted" || signal?.aborted) return thisResult([]);
-            const snapshot = runtime.claim(outcome as Goblin);
-            if (snapshot && snapshot.status !== "dismissed") {
-              claimed.push(snapshot);
-              break;
-            }
-          }
-        }
-        return thisResult(claimed);
+        return thisResult(await runtime.wait(params.mode, params.names, signal));
       } finally {
         clearInterval(interval);
       }
@@ -212,7 +171,7 @@ export function dismissTool(
     description: 'Dismiss a running or terminal uncollected goblin. Pass a goblin name or "all".',
     parameters: DismissParams,
     async execute(_id, params) {
-      if (params.name !== "all" && !runtime.goblins.has(params.name)) {
+      if (params.name !== "all" && !runtime.has(params.name)) {
         return { content: [{ type: "text", text: `No goblin found: ${params.name}` }], details: undefined };
       }
       const names = runtime.dismiss(params.name);

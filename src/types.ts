@@ -37,36 +37,6 @@ export interface OwnedTab {
   readonly agentName: string;
 }
 
-export interface Goblin extends GoblinSnapshot {
-  readonly task: string;
-  readonly launchId: string;
-  readonly ownerId: string;
-  readonly nonce: string;
-  readonly runtimeDir: string;
-  readonly socketPath: string;
-  readonly startedAt: number;
-  readonly done: Promise<void>;
-  readonly resolveDone: () => void;
-  readonly launchController: AbortController;
-  status: GoblinStatus;
-  turns: number;
-  tokens: { input: number; output: number };
-  output?: string;
-  error?: string;
-  activity?: string;
-  herdrStatus?: HerdrStatus;
-  completedAt?: number;
-  tab?: OwnedTab;
-  bridgeReady?: boolean;
-  bridgeResult?: TerminalResult;
-  promptSucceeded?: boolean;
-  coordinationTimer?: ReturnType<typeof setTimeout>;
-  refreshPromise?: Promise<void>;
-  refreshedAt?: number;
-  tabCreateDone?: Promise<void>;
-  launchPromise?: Promise<void>;
-  cleanup?: Promise<void>;
-}
 
 export interface GoblinSettings {
   readonly turnLimit: number;

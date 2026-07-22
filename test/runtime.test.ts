@@ -36,6 +36,7 @@ async function setup(options: FakeOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "pi-goblins-runtime-"));
   roots.push(root);
   let socketPath = "";
+  let manifestPath = "";
   let identity = { workspace_id: "w1", pane_id: "w1:p2", name: "" };
   const calls: string[][] = [];
   let starts = 0;
@@ -62,7 +63,8 @@ async function setup(options: FakeOptions = {}) {
       if (options.tabDelay) await new Promise((resolve) => setTimeout(resolve, options.tabDelay));
       const manifestArg = args.find((arg) => arg.startsWith("PI_GOBLINS_MANIFEST="));
       if (!manifestArg) throw new Error("missing manifest");
-      const manifest = JSON.parse(await readFile(manifestArg.slice("PI_GOBLINS_MANIFEST=".length), "utf8"));
+      manifestPath = manifestArg.slice("PI_GOBLINS_MANIFEST=".length);
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       socketPath = manifest.socketPath;
       const label = args[args.indexOf("--label") + 1];
       return envelope({
@@ -82,16 +84,13 @@ async function setup(options: FakeOptions = {}) {
         };
       }
       identity = { ...identity, name: args[2] ?? "" };
+      const childSocketPath = socketPath;
+      const childManifestPath = manifestPath;
       setTimeout(() => {
-        const socket = connect(socketPath);
+        const socket = connect(childSocketPath);
         socket.on("error", () => {});
         socket.on("connect", () => {
-          const manifestPath = calls
-            .flat()
-            .find((arg) => arg.startsWith("PI_GOBLINS_MANIFEST="))
-            ?.slice("PI_GOBLINS_MANIFEST=".length);
-          if (!manifestPath) throw new Error("manifest path not found");
-          void readFile(manifestPath, "utf8").then((text) => {
+          void readFile(childManifestPath, "utf8").then((text) => {
             const manifest = JSON.parse(text);
             socket.write(
               `${JSON.stringify({ type: "ready", protocol: 1, ownerId: manifest.ownerId, launchId: manifest.launchId, nonce: manifest.nonce, version: "0.81.1" })}\n`,
@@ -149,14 +148,16 @@ async function setup(options: FakeOptions = {}) {
   });
   const parent = model();
   const registry = { getAvailable: () => [parent] } as ModelRegistry;
-  const prepared = await runtime.prepare({
-    task: "perform a sufficiently detailed task",
-    thinking: "medium",
-    trusted: true,
-    parentModel: parent,
-    modelRegistry: registry,
-  });
-  return { runtime, prepared, calls };
+  const prepare = (task = "perform a sufficiently detailed task") =>
+    runtime.prepare({
+      task,
+      thinking: "medium",
+      trusted: true,
+      parentModel: parent,
+      modelRegistry: registry,
+    });
+  const prepared = await prepare();
+  return { runtime, prepared, prepare, calls };
 }
 
 async function waitUntil(predicate: () => boolean, timeout = 1000): Promise<void> {
@@ -171,26 +172,33 @@ function parseText(result: { content: Array<{ type: string; text?: string }> }):
   return JSON.parse(result.content[0]?.text ?? "null");
 }
 
+async function terminalSnapshot(runtime: GoblinRuntime, name: string) {
+  await waitUntil(() => runtime.snapshots([name])[0]?.status !== "running");
+  const snapshot = runtime.snapshots([name])[0];
+  if (!snapshot) throw new Error(`Missing goblin snapshot: ${name}`);
+  return snapshot;
+}
+
 describe("GoblinRuntime lifecycle", () => {
   it("coordinates exact bridge output with identity-matched prompt completion", async () => {
     const { runtime, prepared } = await setup({ result: { status: "completed", output: "a\n\nb" } });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect(goblin.status).toBe("completed");
-    expect(goblin.output).toBe("a\n\nb");
-    expect(runtime.goblins.has(goblin.name)).toBe(true);
-    const snapshot = runtime.claim(goblin);
-    expect(snapshot?.output).toBe("a\n\nb");
-    expect(runtime.goblins.has(goblin.name)).toBe(false);
+    const name = runtime.summon(prepared, "/tmp");
+    const terminal = await terminalSnapshot(runtime, name);
+    expect(terminal.status).toBe("completed");
+    expect(terminal.output).toBe("a\n\nb");
+    expect(runtime.has(name)).toBe(true);
+    const [claimed] = await runtime.wait("all", [name]);
+    expect(claimed?.output).toBe("a\n\nb");
+    expect(runtime.has(name)).toBe(false);
   });
 
   it("preserves partial output and provider error", async () => {
     const { runtime, prepared } = await setup({
       result: { status: "failed", output: "partial", error: "provider failed" },
     });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect({ status: goblin.status, output: goblin.output, error: goblin.error }).toEqual({
+    const name = runtime.summon(prepared, "/tmp");
+    const [result] = await runtime.wait("all", [name]);
+    expect({ status: result?.status, output: result?.output, error: result?.error }).toEqual({
       status: "failed",
       output: "partial",
       error: "provider failed",
@@ -202,21 +210,19 @@ describe("GoblinRuntime lifecycle", () => {
       result: { status: "truncated", output: "final allowed turn" },
       promptDelay: 10_000,
     });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect(goblin.status).toBe("truncated");
-    expect(goblin.output).toBe("final allowed turn");
+    const name = runtime.summon(prepared, "/tmp");
+    const [result] = await runtime.wait("all", [name]);
+    expect(result?.status).toBe("truncated");
+    expect(result?.output).toBe("final allowed turn");
   });
 
   it("dismisses synchronously and claims before asynchronous cleanup", async () => {
-    const { runtime, prepared } = await setup({ promptDelay: 10_000 });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => Boolean(goblin.tab));
-    expect(runtime.dismiss(goblin.name)).toEqual([goblin.name]);
-    expect(goblin.status).toBe("dismissed");
-    expect(runtime.goblins.has(goblin.name)).toBe(false);
-    await expect(runtime.cleanup(goblin)).resolves.toBeUndefined();
-    await expect(runtime.cleanup(goblin)).resolves.toBeUndefined();
+    const { runtime, prepared, calls } = await setup({ promptDelay: 10_000 });
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    expect(runtime.dismiss(name)).toEqual([name]);
+    expect(runtime.has(name)).toBe(false);
+    await runtime.shutdown();
   });
 
   it("keeps the first valid result when a duplicate arrives before prompt completion", async () => {
@@ -225,9 +231,9 @@ describe("GoblinRuntime lifecycle", () => {
       duplicateResult: true,
       promptDelay: 30,
     });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect({ status: goblin.status, output: goblin.output }).toEqual({ status: "completed", output: "first" });
+    const name = runtime.summon(prepared, "/tmp");
+    const [result] = await runtime.wait("all", [name]);
+    expect({ status: result?.status, output: result?.output }).toEqual({ status: "completed", output: "first" });
   });
 
   it("retries agent_pane_busy and validates the eventual start", async () => {
@@ -235,9 +241,8 @@ describe("GoblinRuntime lifecycle", () => {
       result: { status: "completed", output: "done" },
       busyStarts: 1,
     });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect(goblin.status).toBe("completed");
+    const name = runtime.summon(prepared, "/tmp");
+    expect((await runtime.wait("all", [name]))[0]?.status).toBe("completed");
     expect(calls.filter((call) => call[1] === "agent" && call[2] === "start")).toHaveLength(2);
   });
 
@@ -246,28 +251,28 @@ describe("GoblinRuntime lifecycle", () => {
       result: { status: "completed", output: "untrusted" },
       promptIdentityMismatch: true,
     });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await goblin.done;
-    expect(goblin.status).toBe("failed");
-    expect(goblin.error).toContain("prompt response identity mismatch");
+    const name = runtime.summon(prepared, "/tmp");
+    const [result] = await runtime.wait("all", [name]);
+    expect(result?.status).toBe("failed");
+    expect(result?.error).toContain("prompt response identity mismatch");
   });
 
   it("waits for in-flight tab creation before aborting and closing it", async () => {
     const { runtime, prepared, calls } = await setup({ tabDelay: 30 });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => Boolean(goblin.tabCreateDone));
-    runtime.dismiss(goblin.name);
-    await runtime.cleanup(goblin);
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "tab" && call[2] === "create"));
+    runtime.dismiss(name);
+    await runtime.shutdown();
     expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(true);
     expect(calls.some((call) => call[1] === "workspace" && call[2] === "close")).toBe(false);
   });
 
   it("closes only the goblin pane when its tab contains another pane", async () => {
     const { runtime, prepared, calls } = await setup({ promptDelay: 10_000, tabPaneCount: 2 });
-    const goblin = runtime.summon(prepared, "/tmp");
-    await waitUntil(() => Boolean(goblin.tab));
-    runtime.dismiss(goblin.name);
-    await runtime.cleanup(goblin);
+    const name = runtime.summon(prepared, "/tmp");
+    await waitUntil(() => calls.some((call) => call[1] === "agent" && call[2] === "start"));
+    runtime.dismiss(name);
+    await runtime.shutdown();
     expect(calls.some((call) => call[1] === "pane" && call[2] === "close")).toBe(true);
     expect(calls.some((call) => call[1] === "tab" && call[2] === "close")).toBe(false);
   });
@@ -285,7 +290,7 @@ describe("GoblinRuntime lifecycle", () => {
 describe("wait collection races", () => {
   it("allows only one concurrent waiter to claim a terminal goblin", async () => {
     const { runtime, prepared } = await setup({ result: { status: "completed", output: "winner" } });
-    const goblin = runtime.summon(prepared, "/tmp");
+    const name = runtime.summon(prepared, "/tmp");
     const tool = waitTool(runtime);
     const ctx = {} as ExtensionContext;
     const [a, b] = await Promise.all([
@@ -294,12 +299,12 @@ describe("wait collection races", () => {
     ]);
     const lengths = [parseText(a), parseText(b)].map((value) => (value as unknown[]).length).sort();
     expect(lengths).toEqual([0, 1]);
-    expect(runtime.goblins.has(goblin.name)).toBe(false);
+    expect(runtime.has(name)).toBe(false);
   });
 
   it("an aborted wait claims nothing", async () => {
     const { runtime, prepared } = await setup({ result: { status: "completed", output: "later" }, resultDelay: 50 });
-    const goblin = runtime.summon(prepared, "/tmp");
+    const name = runtime.summon(prepared, "/tmp");
     const controller = new AbortController();
     const pending = waitTool(runtime).execute(
       "a",
@@ -310,7 +315,35 @@ describe("wait collection races", () => {
     );
     controller.abort();
     expect(parseText(await pending)).toEqual([]);
-    await goblin.done;
-    expect(runtime.goblins.has(goblin.name)).toBe(true);
+    await terminalSnapshot(runtime, name);
+    expect(runtime.has(name)).toBe(true);
+  });
+
+  it("waits only for the requested names and leaves other results uncollected", async () => {
+    const { runtime, prepared, prepare, calls } = await setup({
+      result: { status: "completed", output: "filtered" },
+    });
+    const otherName = runtime.summon(prepared, "/tmp");
+    await terminalSnapshot(runtime, otherName);
+    await waitUntil(() => calls.some((call) => call[1] === "tab" && call[2] === "close"));
+
+    const requestedName = runtime.summon(
+      await prepare("perform a second sufficiently detailed task"),
+      "/tmp",
+    );
+    const result = await waitTool(runtime).execute(
+      "filtered",
+      { mode: "all", names: [requestedName] },
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    );
+
+    expect(parseText(result)).toEqual([
+      { name: requestedName, status: "completed", output: "filtered" },
+    ]);
+    expect(runtime.has(requestedName)).toBe(false);
+    expect(runtime.has(otherName)).toBe(true);
+    runtime.dismiss("all");
   });
 });

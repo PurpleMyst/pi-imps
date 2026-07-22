@@ -20,7 +20,7 @@ export default function piGoblins(pi: ExtensionAPI): void {
   });
 
   const updateStatus = (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) => {
-    const running = [...runtime.goblins.values()].filter((goblin) => goblin.status === "running").length;
+    const running = runtime.runningCount();
     ctx.ui.setStatus("goblins", running ? `${running} goblin${running === 1 ? "" : "s"}` : undefined);
   };
 

@@ -8,7 +8,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { herdr } from "../src/herdr.js";
 import { GoblinRuntime } from "../src/runtime.js";
-import type { Goblin } from "../src/types.js";
+import type { GoblinSnapshot } from "../src/types.js";
 
 const LIVE = process.env.PI_GOBLINS_LIVE === "1";
 const MODEL_ID = process.env.PI_GOBLINS_LIVE_MODEL;
@@ -16,6 +16,11 @@ const BRIDGE_PATH = fileURLToPath(new URL("../src/child-bridge.ts", import.meta.
 const runtimes: GoblinRuntime[] = [];
 const roots: string[] = [];
 const ownedTabs = new Map<string, string>();
+
+interface LiveGoblin {
+  readonly name: string;
+  readonly tab: { readonly tabId: string; readonly label: string };
+}
 
 function liveModel(): Model<Api> {
   const separator = MODEL_ID?.indexOf("/") ?? -1;
@@ -48,7 +53,7 @@ async function makeRuntime(toolAllowlist: string[] | undefined): Promise<{ runti
   return { runtime, root };
 }
 
-async function summon(runtime: GoblinRuntime, root: string, task: string): Promise<Goblin> {
+async function summon(runtime: GoblinRuntime, root: string, task: string): Promise<LiveGoblin> {
   const model = liveModel();
   const prepared = await runtime.prepare({
     task,
@@ -58,12 +63,29 @@ async function summon(runtime: GoblinRuntime, root: string, task: string): Promi
     parentModel: model,
     modelRegistry: { getAvailable: () => [model] } as ModelRegistry,
   });
-  const goblin = runtime.summon(prepared, root);
-  await waitUntil(() => Boolean(goblin.tab), 65_000, "Herdr tab creation");
-  const tab = goblin.tab;
-  if (!tab) throw new Error("Goblin did not record its Herdr tab");
+  const name = runtime.summon(prepared, root);
+  await waitUntil(async () => Boolean(await tabForGoblin(name)), 65_000, "Herdr tab creation");
+  const tab = await tabForGoblin(name);
+  if (!tab) throw new Error("Goblin did not create an identifiable Herdr tab");
   ownedTabs.set(tab.tabId, tab.label);
-  return goblin;
+  return { name, tab };
+}
+
+async function tabForGoblin(name: string): Promise<LiveGoblin["tab"] | undefined> {
+  const result = await herdr(["tab", "list", "--workspace", parentContext().workspaceId]);
+  if (!Array.isArray(result.tabs)) return undefined;
+  for (const value of result.tabs) {
+    if (typeof value !== "object" || value === null) continue;
+    const tab = value as Record<string, unknown>;
+    if (
+      typeof tab.tab_id === "string" &&
+      typeof tab.label === "string" &&
+      tab.label.startsWith(`pi-goblin-${name}-`)
+    ) {
+      return { tabId: tab.tab_id, label: tab.label };
+    }
+  }
+  return undefined;
 }
 
 async function tabExists(tabId: string, label: string): Promise<boolean> {
@@ -93,16 +115,19 @@ async function waitUntil(
   }
 }
 
-async function waitForResult(goblin: Goblin): Promise<void> {
+async function waitForResult(runtime: GoblinRuntime, goblin: LiveGoblin): Promise<GoblinSnapshot> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      goblin.done,
+    return await Promise.race([
+      runtime.wait("all", [goblin.name]).then(([result]) => {
+        if (!result) throw new Error(`Goblin result was already collected: ${goblin.name}`);
+        return result;
+      }),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Timed out waiting for ${goblin.name}: ${goblin.error ?? "still running"}`)),
-          120_000,
-        );
+        timer = setTimeout(() => {
+          const snapshot = runtime.snapshots([goblin.name])[0];
+          reject(new Error(`Timed out waiting for ${goblin.name}: ${snapshot?.error ?? "still running"}`));
+        }, 120_000);
       }),
     ]);
   } finally {
@@ -110,9 +135,8 @@ async function waitForResult(goblin: Goblin): Promise<void> {
   }
 }
 
-async function assertCleaned(goblin: Goblin): Promise<void> {
-  const tab = goblin.tab;
-  if (!tab) throw new Error("Goblin did not create a tab");
+async function assertCleaned(goblin: LiveGoblin): Promise<void> {
+  const { tab } = goblin;
   await waitUntil(async () => !(await tabExists(tab.tabId, tab.label)), 15_000, `tab ${tab.tabId} cleanup`);
   ownedTabs.delete(tab.tabId);
 }
@@ -149,17 +173,15 @@ describe.skipIf(!LIVE)("live Herdr integration", () => {
       root,
       `Try to use the write tool to create ${forbiddenPath} containing ${token}, then explain the outcome.`,
     );
-    const tab = goblin.tab;
-    expect(tab).toBeDefined();
-    expect(await tabExists(tab?.tabId ?? "", tab?.label ?? "")).toBe(true);
+    const { tab } = goblin;
+    expect(await tabExists(tab.tabId, tab.label)).toBe(true);
 
-    await waitForResult(goblin);
-    expect({ status: goblin.status, error: goblin.error }).toEqual({ status: "completed", error: undefined });
+    const result = await waitForResult(runtime, goblin);
+    expect({ status: result.status, error: result.error }).toEqual({ status: "completed", error: undefined });
     await expect(readFile(forbiddenPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-    expect(goblin.turns).toBeGreaterThan(0);
-    expect(goblin.tokens.output).toBeGreaterThan(0);
+    expect(result.turns).toBeGreaterThan(0);
+    expect(result.tokens.output).toBeGreaterThan(0);
 
-    expect(runtime.claim(goblin)?.status).toBe("completed");
     await assertCleaned(goblin);
   }, 150_000);
 
@@ -173,12 +195,11 @@ describe.skipIf(!LIVE)("live Herdr integration", () => {
       `Use the write tool to create ${outputPath} containing exactly ${token}, then reply with exactly ${token}.`,
     );
 
-    await waitForResult(goblin);
-    expect({ status: goblin.status, error: goblin.error }).toEqual({ status: "completed", error: undefined });
+    const result = await waitForResult(runtime, goblin);
+    expect({ status: result.status, error: result.error }).toEqual({ status: "completed", error: undefined });
     expect(await readFile(outputPath, "utf8")).toBe(token);
-    expect(goblin.output).toContain(token);
+    expect(result.output).toContain(token);
 
-    runtime.claim(goblin);
     await assertCleaned(goblin);
   }, 150_000);
 
@@ -189,12 +210,10 @@ describe.skipIf(!LIVE)("live Herdr integration", () => {
       root,
       "Write a very detailed twenty-section explanation of distributed consensus, pausing to reason carefully.",
     );
-    const tab = goblin.tab;
-    expect(tab).toBeDefined();
-    expect(await tabExists(tab?.tabId ?? "", tab?.label ?? "")).toBe(true);
+    const { tab } = goblin;
+    expect(await tabExists(tab.tabId, tab.label)).toBe(true);
 
     expect(runtime.dismiss(goblin.name)).toEqual([goblin.name]);
-    expect(goblin.status).toBe("dismissed");
     await assertCleaned(goblin);
   }, 90_000);
 });

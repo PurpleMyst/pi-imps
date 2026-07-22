@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { BridgeServer } from "./bridge.js";
+import { GoblinRecord } from "./goblin-record.js";
 import {
   type CommandRunner,
   HerdrCommandError,
@@ -15,13 +16,11 @@ import {
 import { createNamePool } from "./names.js";
 import type {
   ChildManifest,
-  Goblin,
   GoblinSettings,
   GoblinSnapshot,
   HerdrStatus,
   OwnedTab,
   ParentHerdrContext,
-  TerminalResult,
   ThinkingLevel,
 } from "./types.js";
 import { buildPiArgs, resolveModel, resolveTools, validateRuntimePaths, validateTask } from "./validation.js";
@@ -29,9 +28,9 @@ import { buildPiArgs, resolveModel, resolveTools, validateRuntimePaths, validate
 const LAUNCH_DEADLINE_MS = 60_000;
 const START_BUSY_RETRY_MS = 250;
 const START_BUSY_WINDOW_MS = 5_000;
-const COORDINATION_MS = 3_000;
 const REFRESH_CACHE_MS = 1_000;
 const SHUTDOWN_BARRIER_MS = 65_000;
+const ABORTED = Symbol("aborted");
 
 interface PreparedLaunch {
   readonly task: string;
@@ -61,7 +60,7 @@ export interface RuntimeOptions {
   readonly runtimeRoot?: string;
   readonly runner?: CommandRunner;
   readonly prerequisites?: Prerequisites;
-  readonly bridgeFactory?: (manifest: ChildManifest, goblin: Goblin, runtime: GoblinRuntime) => BridgeServer;
+  readonly bridgeFactory?: (manifest: ChildManifest) => BridgeServer;
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -79,16 +78,11 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function immutableSnapshot(goblin: Goblin): GoblinSnapshot {
-  return Object.freeze({
-    name: goblin.name,
-    status: goblin.status,
-    turns: goblin.turns,
-    tokens: Object.freeze({ ...goblin.tokens }),
-    ...(goblin.output !== undefined ? { output: goblin.output } : {}),
-    ...(goblin.error !== undefined ? { error: goblin.error } : {}),
-    ...(goblin.activity !== undefined ? { activity: goblin.activity } : {}),
-    ...(goblin.herdrStatus !== undefined ? { herdrStatus: goblin.herdrStatus } : {}),
+function aborted(signal: AbortSignal | undefined): Promise<typeof ABORTED> | undefined {
+  if (!signal) return undefined;
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve(ABORTED);
+    else signal.addEventListener("abort", () => resolve(ABORTED), { once: true });
   });
 }
 
@@ -101,8 +95,8 @@ function identityMatches(agent: Record<string, unknown>, tab: OwnedTab): boolean
 }
 
 export class GoblinRuntime {
-  readonly goblins = new Map<string, Goblin>();
   readonly ownerId = randomUUID();
+  private readonly records = new Map<string, GoblinRecord>();
   private readonly names = createNamePool();
   private readonly runner: CommandRunner;
   private readonly prerequisites: Prerequisites;
@@ -170,11 +164,9 @@ export class GoblinRuntime {
     };
   }
 
-  summon(prepared: PreparedLaunch, cwd: string): Goblin {
+  summon(prepared: PreparedLaunch, cwd: string): string {
     const name = this.names.allocate();
-    let resolveDone!: () => void;
-    const done = new Promise<void>((resolve) => (resolveDone = resolve));
-    const goblin: Goblin = {
+    const record = new GoblinRecord({
       name,
       task: prepared.task,
       launchId: prepared.launchId,
@@ -182,71 +174,52 @@ export class GoblinRuntime {
       nonce: prepared.nonce,
       runtimeDir: prepared.runtimeDir,
       socketPath: prepared.socketPath,
-      startedAt: Date.now(),
-      status: "running",
-      turns: 0,
-      tokens: { input: 0, output: 0 },
-      done,
-      resolveDone,
-      launchController: new AbortController(),
-    };
-    this.goblins.set(name, goblin);
-    goblin.launchPromise = this.launch(goblin, prepared, cwd).catch((error) => this.fail(goblin, error));
-    return goblin;
+      onTerminal: (terminal) => this.trackCleanup(terminal),
+    });
+    this.records.set(name, record);
+    record.setLaunchPromise(this.launch(record, prepared, cwd).catch((error) => record.fail(error)));
+    return name;
   }
 
-  private createBridge(manifest: ChildManifest, goblin: Goblin): BridgeServer {
-    if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest, goblin, this);
+  private createBridge(manifest: ChildManifest, record: GoblinRecord): BridgeServer {
+    if (this.options.bridgeFactory) return this.options.bridgeFactory(manifest);
     return new BridgeServer(manifest, {
-      onReady: () => {
-        goblin.bridgeReady = true;
-        this.readyResolvers.get(goblin.launchId)?.();
-      },
-      onTool: (activity) => {
-        if (goblin.status === "running") goblin.activity = activity;
-      },
-      onTurn: (turns, tokens) => {
-        if (goblin.status !== "running") return;
-        goblin.turns = turns;
-        goblin.tokens = { ...tokens };
-      },
-      onResult: (result) => this.bridgeResult(goblin, result),
+      onReady: () => record.markReady(),
+      onTool: (activity) => record.updateActivity(activity),
+      onTurn: (turns, tokens) => record.updateTurn(turns, tokens),
+      onResult: (result) => record.acceptBridgeResult(result),
       onError: (error) => {
         if (shouldInvalidatePreflight(error)) this.prerequisites.invalidate();
-        if (goblin.status === "running" && !goblin.bridgeResult) this.fail(goblin, error);
+        if (record.isRunning() && !record.hasBridgeResult()) record.fail(error);
       },
     });
   }
 
-  private readonly readyResolvers = new Map<string, () => void>();
-
-  private async launch(goblin: Goblin, prepared: PreparedLaunch, cwd: string): Promise<void> {
+  private async launch(record: GoblinRecord, prepared: PreparedLaunch, cwd: string): Promise<void> {
     const deadline = Date.now() + LAUNCH_DEADLINE_MS;
     const manifest: ChildManifest = {
       protocol: 1,
-      ownerId: goblin.ownerId,
-      launchId: goblin.launchId,
-      nonce: goblin.nonce,
-      socketPath: goblin.socketPath,
+      ownerId: record.ownerId,
+      launchId: record.launchId,
+      nonce: record.nonce,
+      socketPath: record.socketPath,
       turnLimit: this.options.settings.turnLimit,
     };
-    const bridge = this.createBridge(manifest, goblin);
-    goblin.cleanup = undefined;
-    await mkdir(goblin.runtimeDir, { recursive: true, mode: 0o700 });
-    await writeFile(join(goblin.runtimeDir, "manifest.json"), JSON.stringify(manifest), {
+    const bridge = this.createBridge(manifest, record);
+    await mkdir(record.runtimeDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(record.runtimeDir, "manifest.json"), JSON.stringify(manifest), {
       mode: 0o600,
       flag: "wx",
     }).catch(async (error) => {
-      await rm(goblin.runtimeDir, { recursive: true, force: true });
+      await rm(record.runtimeDir, { recursive: true, force: true });
       throw error;
     });
-    await bridge.listen(goblin.runtimeDir);
-    this.bridges.set(goblin.launchId, bridge);
+    await bridge.listen(record.runtimeDir);
+    record.attachBridge(bridge);
 
     const remaining = () => deadline - Date.now();
-    const label = `pi-goblin-${goblin.name}-${goblin.launchId}`;
-    let finishTabCreate!: () => void;
-    goblin.tabCreateDone = new Promise<void>((resolve) => (finishTabCreate = resolve));
+    const label = `pi-goblin-${record.name}-${record.launchId}`;
+    const finishTabCreate = record.beginTabCreate();
     let tabResult: Record<string, unknown>;
     try {
       tabResult = await this.command(
@@ -262,35 +235,36 @@ export class GoblinRuntime {
           "--env",
           "PI_GOBLINS_CHILD=1",
           "--env",
-          `PI_GOBLINS_MANIFEST=${join(goblin.runtimeDir, "manifest.json")}`,
+          `PI_GOBLINS_MANIFEST=${join(record.runtimeDir, "manifest.json")}`,
           "--no-focus",
         ],
-        goblin.launchController.signal,
+        record.launchController.signal,
         remaining(),
       );
     } finally {
       finishTabCreate();
     }
-    const tab = tabResult.tab as Record<string, unknown> | undefined;
+    const tabValue = tabResult.tab as Record<string, unknown> | undefined;
     const rootPane = tabResult.root_pane as Record<string, unknown> | undefined;
     if (
       tabResult.type !== "tab_created" ||
-      typeof tab?.tab_id !== "string" ||
-      tab.workspace_id !== this.options.parent.workspaceId ||
-      tab.label !== label ||
+      typeof tabValue?.tab_id !== "string" ||
+      tabValue.workspace_id !== this.options.parent.workspaceId ||
+      tabValue.label !== label ||
       typeof rootPane?.pane_id !== "string" ||
-      rootPane.tab_id !== tab.tab_id ||
+      rootPane.tab_id !== tabValue.tab_id ||
       rootPane.workspace_id !== this.options.parent.workspaceId
     ) {
       throw new Error("Malformed or identity-mismatched Herdr tab creation response");
     }
-    goblin.tab = {
+    const tab: OwnedTab = {
       workspaceId: this.options.parent.workspaceId,
-      tabId: tab.tab_id,
+      tabId: tabValue.tab_id,
       paneId: rootPane.pane_id,
       label,
-      agentName: internalAgentName(goblin.launchId),
+      agentName: internalAgentName(record.launchId),
     };
+    record.setTab(tab);
 
     const args = buildPiArgs(
       {
@@ -310,60 +284,52 @@ export class GoblinRuntime {
           [
             "agent",
             "start",
-            goblin.tab.agentName,
+            tab.agentName,
             "--kind",
             "pi",
             "--pane",
-            goblin.tab.paneId,
+            tab.paneId,
             "--timeout",
             String(Math.floor(left)),
             "--",
             ...args,
           ],
-          goblin.launchController.signal,
+          record.launchController.signal,
           left,
         );
         const agent = started.agent as Record<string, unknown> | undefined;
-        if (started.type !== "agent_started" || !agent || !identityMatches(agent, goblin.tab)) {
+        if (started.type !== "agent_started" || !agent || !identityMatches(agent, tab)) {
           throw new Error("Herdr agent start identity mismatch");
         }
         break;
       } catch (error) {
         if (!(error instanceof HerdrCommandError) || error.code !== "agent_pane_busy" || Date.now() >= busyUntil)
           throw error;
-        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), goblin.launchController.signal);
+        await delay(Math.min(START_BUSY_RETRY_MS, busyUntil - Date.now()), record.launchController.signal);
         if (Date.now() >= busyUntil) throw error;
       }
     }
 
-    if (!goblin.bridgeReady) {
-      const ready = new Promise<void>((resolve) => {
-        this.readyResolvers.set(goblin.launchId, resolve);
-        if (goblin.bridgeReady) resolve();
-      });
+    if (!record.isReady()) {
       await Promise.race([
-        ready,
-        delay(Math.max(0, remaining()), goblin.launchController.signal).then(() => {
+        record.ready,
+        delay(Math.max(0, remaining()), record.launchController.signal).then(() => {
           throw new Error("Timed out waiting for authenticated child readiness");
         }),
       ]);
-      this.readyResolvers.delete(goblin.launchId);
     }
     if (remaining() <= 0) throw new Error("The shared launch deadline expired before prompting");
 
     const prompted = await this.command(
-      ["agent", "prompt", goblin.tab.agentName, goblin.task, "--wait", "--until", "idle", "--until", "done"],
-      goblin.launchController.signal,
+      ["agent", "prompt", tab.agentName, record.task, "--wait", "--until", "idle", "--until", "done"],
+      record.launchController.signal,
     );
     const promptAgent = prompted.agent as Record<string, unknown> | undefined;
-    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, goblin.tab)) {
+    if (prompted.type !== "agent_prompted" || !promptAgent || !identityMatches(promptAgent, tab)) {
       throw new Error("Herdr prompt response identity mismatch");
     }
-    goblin.promptSucceeded = true;
-    this.coordinate(goblin);
+    record.acceptPromptSuccess();
   }
-
-  private readonly bridges = new Map<string, BridgeServer>();
 
   private async command(
     args: readonly string[],
@@ -378,119 +344,125 @@ export class GoblinRuntime {
     }
   }
 
-  private bridgeResult(goblin: Goblin, result: TerminalResult): void {
-    if (goblin.status !== "running" || goblin.bridgeResult) return;
-    goblin.bridgeResult = Object.freeze({ ...result });
-    if (result.status === "truncated") this.terminalize(goblin, result);
-    else this.coordinate(goblin);
+  has(name: string): boolean {
+    return this.records.has(name);
   }
 
-  private coordinate(goblin: Goblin): void {
-    if (goblin.status !== "running") return;
-    if (goblin.bridgeResult && goblin.promptSucceeded) {
-      if (goblin.coordinationTimer) clearTimeout(goblin.coordinationTimer);
-      this.terminalize(goblin, goblin.bridgeResult);
-      return;
+  hasEligible(names?: readonly string[]): boolean {
+    return this.eligible(names ? new Set(names) : undefined).length > 0;
+  }
+
+  runningCount(): number {
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.isRunning()) count++;
     }
-    if ((goblin.bridgeResult || goblin.promptSucceeded) && !goblin.coordinationTimer) {
-      goblin.coordinationTimer = setTimeout(
-        () =>
-          this.fail(goblin, new Error("Bridge result and Herdr prompt completion did not coordinate within 3 seconds")),
-        COORDINATION_MS,
-      );
+    return count;
+  }
+
+  snapshots(names?: readonly string[]): GoblinSnapshot[] {
+    return this.eligible(names ? new Set(names) : undefined).map((record) => record.snapshot());
+  }
+
+  async wait(
+    mode: "all" | "first",
+    names?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<GoblinSnapshot[]> {
+    const filter = names ? new Set(names) : undefined;
+    let waiting = this.eligible(filter);
+    if (waiting.length === 0) return [];
+    const abortPromise = aborted(signal);
+    const claimed: GoblinSnapshot[] = [];
+
+    if (mode === "all") {
+      const outcome = await Promise.race([
+        Promise.all(waiting.map((record) => record.done)).then(() => "done" as const),
+        ...(abortPromise ? [abortPromise] : []),
+      ]);
+      if (outcome === ABORTED || signal?.aborted) return [];
+      for (const record of waiting) {
+        const snapshot = this.claim(record);
+        if (snapshot && snapshot.status !== "dismissed") claimed.push(snapshot);
+      }
+      return claimed;
+    }
+
+    for (;;) {
+      waiting = this.eligible(filter);
+      if (waiting.length === 0) return claimed;
+      const outcome = await Promise.race([
+        ...waiting.map((record) => record.done.then(() => record)),
+        ...(abortPromise ? [abortPromise] : []),
+      ]);
+      if (outcome === ABORTED || signal?.aborted) return [];
+      const snapshot = this.claim(outcome);
+      if (snapshot && snapshot.status !== "dismissed") {
+        claimed.push(snapshot);
+        return claimed;
+      }
     }
   }
 
-  private fail(goblin: Goblin, error: unknown): void {
-    this.terminalize(goblin, {
-      status: "failed",
-      output: goblin.bridgeResult?.output ?? "",
-      error: error instanceof Error ? error.message : String(error),
-    });
+  private eligible(names: ReadonlySet<string> | undefined): GoblinRecord[] {
+    return [...this.records.values()].filter((record) => !names || names.has(record.name));
   }
 
-  private terminalize(goblin: Goblin, result: TerminalResult | { status: "dismissed" }): boolean {
-    if (goblin.status !== "running") return false;
-    if (goblin.coordinationTimer) clearTimeout(goblin.coordinationTimer);
-    goblin.status = result.status;
-    if ("output" in result) goblin.output = result.output;
-    if ("error" in result) goblin.error = result.error;
-    goblin.completedAt = Date.now();
-    goblin.resolveDone();
-    queueMicrotask(() => this.trackCleanup(goblin));
-    return true;
-  }
-
-  claim(goblin: Goblin): GoblinSnapshot | undefined {
-    if (goblin.status === "running") return undefined;
-    return this.collect(goblin);
-  }
-
-  private collect(goblin: Goblin): GoblinSnapshot | undefined {
-    if (this.goblins.get(goblin.name) !== goblin) return undefined;
-    this.goblins.delete(goblin.name);
-    this.names.release(goblin.name);
-    const snapshot = immutableSnapshot(goblin);
-    this.trackCleanup(goblin);
+  private claim(record: GoblinRecord): GoblinSnapshot | undefined {
+    if (record.isRunning() || this.records.get(record.name) !== record) return undefined;
+    this.records.delete(record.name);
+    this.names.release(record.name);
+    const snapshot = record.snapshot();
+    this.trackCleanup(record);
     return snapshot;
   }
 
   dismiss(name: string): string[] {
     const targets =
       name === "all"
-        ? [...this.goblins.values()]
-        : [this.goblins.get(name)].filter((goblin): goblin is Goblin => Boolean(goblin));
+        ? [...this.records.values()]
+        : [this.records.get(name)].filter((record): record is GoblinRecord => Boolean(record));
     const dismissed: string[] = [];
-    for (const goblin of targets) {
-      if (goblin.status === "running") this.terminalize(goblin, { status: "dismissed" });
-      if (this.collect(goblin)) dismissed.push(goblin.name);
+    for (const record of targets) {
+      if (record.isRunning()) record.dismiss();
+      if (this.claim(record)) dismissed.push(record.name);
     }
     return dismissed;
   }
 
-  snapshots(): GoblinSnapshot[] {
-    return [...this.goblins.values()].map(immutableSnapshot);
+  async refreshAll(names?: readonly string[]): Promise<void> {
+    const records = this.eligible(names ? new Set(names) : undefined);
+    await Promise.all(records.map((record) => this.refresh(record)));
   }
 
-  async refresh(goblin: Goblin): Promise<void> {
-    if (!goblin.tab || goblin.status !== "running") return;
-    if (goblin.refreshedAt && Date.now() - goblin.refreshedAt < REFRESH_CACHE_MS) return;
-    if (goblin.refreshPromise) return goblin.refreshPromise;
-    goblin.refreshPromise = (async () => {
+  private async refresh(record: GoblinRecord): Promise<void> {
+    await record.refresh(REFRESH_CACHE_MS, async (tab) => {
       try {
-        const result = await this.command(["agent", "get", goblin.tab?.agentName ?? ""]);
+        const result = await this.command(["agent", "get", tab.agentName]);
         const agent = result.agent as Record<string, unknown> | undefined;
-        if (result.type !== "agent_info" || !agent || !goblin.tab || !identityMatches(agent, goblin.tab)) return;
+        if (result.type !== "agent_info" || !agent || !identityMatches(agent, tab)) return undefined;
         if (["idle", "working", "blocked", "done", "unknown"].includes(String(agent.agent_status))) {
-          goblin.herdrStatus = agent.agent_status as HerdrStatus;
+          return agent.agent_status as HerdrStatus;
         }
       } catch {
         // Display-only refresh never settles a goblin.
-      } finally {
-        goblin.refreshedAt = Date.now();
-        goblin.refreshPromise = undefined;
       }
-    })();
-    return goblin.refreshPromise;
+      return undefined;
+    });
   }
 
-  async refreshAll(goblins: readonly Goblin[] = [...this.goblins.values()]): Promise<void> {
-    await Promise.all(goblins.map((goblin) => this.refresh(goblin)));
-  }
-
-  private trackCleanup(goblin: Goblin): void {
-    const cleanup = this.cleanup(goblin);
+  private trackCleanup(record: GoblinRecord): void {
+    const cleanup = this.cleanup(record);
     this.cleanups.add(cleanup);
     cleanup.finally(() => this.cleanups.delete(cleanup)).catch(() => {});
   }
 
-  cleanup(goblin: Goblin): Promise<void> {
-    if (goblin.cleanup) return goblin.cleanup;
-    goblin.cleanup = (async () => {
-      await goblin.tabCreateDone?.catch(() => {});
-      goblin.launchController.abort();
-      await goblin.launchPromise?.catch(() => {});
-      const tab = goblin.tab;
+  private cleanup(record: GoblinRecord): Promise<void> {
+    return record.cleanup(async () => {
+      await record.waitForTabCreate()?.catch(() => {});
+      record.launchController.abort();
+      await record.waitForLaunch()?.catch(() => {});
+      const tab = record.getTab();
       if (tab) {
         try {
           const paneResult = await this.command(["pane", "get", tab.paneId], undefined, 3_000);
@@ -548,14 +520,9 @@ export class GoblinRuntime {
           }
         } catch {}
       }
-      await this.bridges
-        .get(goblin.launchId)
-        ?.close()
-        .catch(() => {});
-      this.bridges.delete(goblin.launchId);
-      await rm(goblin.runtimeDir, { recursive: true, force: true });
-    })();
-    return goblin.cleanup;
+      await record.closeBridge().catch(() => {});
+      await rm(record.runtimeDir, { recursive: true, force: true });
+    });
   }
 
   shutdown(): Promise<void> {
