@@ -2,45 +2,30 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/Jomik/pi-imps/blob/main/imps.schema.json",
   "title": "pi-imps configuration",
-  "description": "Global configuration for pi-imps. Place at ~/.pi/agent/imps.json.",
+  "description": "Global configuration for Herdr-owned Pi imps. Place at ~/.pi/agent/imps.json.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
-      "description": "JSON Schema reference (optional self-reference)"
+      "description": "JSON Schema reference"
     },
     "turnLimit": {
       "type": "integer",
       "minimum": 2,
       "default": 30,
-      "description": "Max turns before an imp is cut off. Acts as a circuit breaker for runaway imps."
+      "description": "Maximum assistant turns before the child bridge publishes a truncated result."
     },
     "toolAllowlist": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Default tool allowlist for all imps. Omit to allow all tools. Agent frontmatter `tools` overrides this per-agent."
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Child tool allowlist. Omit for Pi defaults; use an empty array for --no-tools."
     },
-    "additionalExtensions": {
+    "modelPatterns": {
       "type": "array",
       "items": { "type": "string" },
-      "default": [],
-      "description": "Extensions that always load on imp sessions regardless of tool filtering. Agent frontmatter cannot override this."
-    },
-    "agents": {
-      "type": "object",
-      "description": "Per-agent additive tool grants. Keys are agent names (use \"_\" for ephemeral imps). Tools listed here are unioned with the agent's frontmatter tools.",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "tools": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Additional tools to grant this agent beyond its frontmatter baseline."
-          }
-        },
-        "additionalProperties": false
-      }
+      "description": "Case-sensitive whole canonical provider/model globs using only * and ?. Omit to allow all; use an empty array to allow none."
     }
   }
 }

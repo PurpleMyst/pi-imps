@@ -1,62 +1,99 @@
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+export type ThinkingLevel = ModelThinkingLevel;
+export type ResultStatus = "completed" | "failed" | "truncated";
+export type ImpStatus = "running" | ResultStatus | "dismissed";
+export type HerdrStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type ImpStatus = "running" | "completed" | "failed" | "dismissed" | "truncated";
+export interface TerminalResult {
+  readonly status: ResultStatus;
+  readonly output: string;
+  readonly error?: string;
+}
 
-/** Serializable subset of Imp — safe for details/display, no runtime handles. */
 export interface ImpSnapshot {
   readonly name: string;
-  readonly agent: string | undefined;
+  readonly status: ImpStatus;
+  readonly turns: number;
+  readonly tokens: { readonly input: number; readonly output: number };
+  readonly output?: string;
+  readonly error?: string;
+  readonly activity?: string;
+  readonly herdrStatus?: HerdrStatus;
+}
+
+export interface OwnedWorkspace {
+  readonly workspaceId: string;
+  readonly paneId: string;
+  readonly label: string;
+  readonly agentName: string;
+}
+
+export interface Imp extends ImpSnapshot {
+  readonly task: string;
+  readonly launchId: string;
+  readonly ownerId: string;
+  readonly nonce: string;
+  readonly runtimeDir: string;
+  readonly socketPath: string;
+  readonly startedAt: number;
+  readonly done: Promise<void>;
+  readonly resolveDone: () => void;
+  readonly launchController: AbortController;
   status: ImpStatus;
   turns: number;
   tokens: { input: number; output: number };
   output?: string;
   error?: string;
-  activity?: string; // live: "→ bash npm test"
-}
-
-/** Full runtime imp — extends snapshot with non-serializable handles. */
-export interface Imp extends ImpSnapshot {
-  readonly task: string;
-  readonly startedAt: number;
-  readonly controller: AbortController;
+  activity?: string;
+  herdrStatus?: HerdrStatus;
   completedAt?: number;
-  session?: { abort(): Promise<void> }; // set once session is spawned
-  /** Resolves when the imp finishes (completed/failed). Never rejects. */
-  readonly done: Promise<void>;
-  readonly resolveDone: () => void;
+  workspace?: OwnedWorkspace;
+  bridgeReady?: boolean;
+  bridgeResult?: TerminalResult;
+  promptSucceeded?: boolean;
+  coordinationTimer?: ReturnType<typeof setTimeout>;
+  refreshPromise?: Promise<void>;
+  refreshedAt?: number;
+  workspaceCreateDone?: Promise<void>;
+  launchPromise?: Promise<void>;
+  cleanup?: Promise<void>;
 }
 
-export type AgentSource = "user" | "project";
-
-export interface AgentConfig {
-  readonly name: string;
-  readonly description: string;
-  readonly model?: string;
-  readonly thinking?: ThinkingLevel;
-  readonly tools?: string[];
-  readonly turnLimit?: number;
-  readonly systemPrompt: string;
-  readonly source: AgentSource;
-  readonly filePath: string;
-}
-
-/** Extension settings under the "pi-imps" key in settings.json */
 export interface ImpSettings {
-  /** Max turns before an imp is cut off. Default: 30 */
-  turnLimit: number;
-  /** Default tool allowlist for all imps. undefined = all tools allowed */
-  toolAllowlist: string[] | undefined;
-  /** Extensions that always load on imp sessions regardless of tool filtering */
-  additionalExtensions: string[];
-  /** Per-agent additive tool grants from global ~/.pi/agent/imps.json */
-  agents: Record<string, { tools?: string[] }>;
+  readonly turnLimit: number;
+  readonly toolAllowlist: string[] | undefined;
+  readonly modelPatterns: string[] | undefined;
 }
 
-/**
- * Project-level imp configuration from .pi/imps.json.
- * Can only add tools to agents — never remove.
- */
-export interface ProjectImpConfig {
-  agents?: Record<string, { tools?: string[] }>;
+export interface ChildManifest {
+  readonly protocol: 1;
+  readonly ownerId: string;
+  readonly launchId: string;
+  readonly nonce: string;
+  readonly socketPath: string;
+  readonly turnLimit: number;
 }
+
+export interface BridgeReady {
+  readonly type: "ready";
+  readonly protocol: 1;
+  readonly ownerId: string;
+  readonly launchId: string;
+  readonly nonce: string;
+  readonly version: string;
+}
+
+export type BridgeMessage =
+  | BridgeReady
+  | { readonly type: "tool"; readonly ownerId: string; readonly launchId: string; readonly preview: string }
+  | {
+      readonly type: "turn";
+      readonly ownerId: string;
+      readonly launchId: string;
+      readonly turns: number;
+      readonly tokens: { readonly input: number; readonly output: number };
+    }
+  | ({ readonly type: "result"; readonly ownerId: string; readonly launchId: string } & TerminalResult)
+  | { readonly type: "error"; readonly ownerId: string; readonly launchId: string; readonly error: string };

@@ -1,242 +1,76 @@
-import {
-  type AgentToolResult,
-  type AgentToolUpdateCallback,
-  type ExtensionContext,
-  keyHint,
-  type Theme,
-  type ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, keyHint, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatImpStatusDisplay, formatSummonCall, formatSummonDisplay, formatWaitDisplay } from "./display.js";
-import { spawnImpSession } from "./session.js";
-import { allImps, findImp, uncollectedImps } from "./state.js";
-import type { AgentConfig, Imp, ImpSettings, ImpSnapshot, ThinkingLevel } from "./types.js";
+import { formatImpStatusDisplay, formatSummonCall, formatWaitDisplay } from "./display.js";
+import type { ImpRuntime } from "./runtime.js";
+import type { Imp, ImpSnapshot, ThinkingLevel } from "./types.js";
 
-// ─── LLM result formatting (JSON) ────────────────────────────────────────────
-
-function impToJson(imp: Imp): Record<string, unknown> {
+function impJson(imp: ImpSnapshot): Record<string, unknown> {
   return {
     name: imp.name,
     status: imp.status,
-    agent: imp.agent,
-    error: imp.error,
-    output: imp.output,
+    ...(imp.error !== undefined ? { error: imp.error } : {}),
+    ...(imp.output !== undefined ? { output: imp.output } : {}),
   };
 }
-
-// ─── Serialization ───────────────────────────────────────────────────────────
-
-function impToSnapshot(imp: Imp): ImpSnapshot {
-  return {
-    name: imp.name,
-    agent: imp.agent,
-    status: imp.status,
-    turns: imp.turns,
-    tokens: { ...imp.tokens },
-    output: imp.output,
-    error: imp.error,
-    activity: imp.activity,
-  };
-}
-
-// ─── summon ────────────────────────────────────────────────────────────────
 
 const SummonParams = Type.Object({
   task: Type.String({ description: "What the imp should do", minLength: 10 }),
-  agent: Type.Optional(Type.String({ description: "Named agent to use, or omit for ephemeral", minLength: 1 })),
   model: Type.Optional(Type.String({ description: "Model override for this imp", minLength: 1 })),
   thinking: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("off"),
-        Type.Literal("minimal"),
-        Type.Literal("low"),
-        Type.Literal("medium"),
-        Type.Literal("high"),
-        Type.Literal("xhigh"),
-        Type.Literal("max"),
-      ],
-      { description: "Thinking level override for this imp" },
-    ),
+    Type.Union([
+      Type.Literal("off"),
+      Type.Literal("minimal"),
+      Type.Literal("low"),
+      Type.Literal("medium"),
+      Type.Literal("high"),
+      Type.Literal("xhigh"),
+      Type.Literal("max"),
+    ]),
   ),
 });
 
-interface SummonDetails {
-  name: string;
-  agent: string | undefined;
-}
-
 export function summonTool(
-  imps: Map<string, Imp>,
-  agents: AgentConfig[],
-  namePool: { allocate(): string; release(name: string): void },
-  settings: ImpSettings,
-  getParentThinkingLevel: () => ThinkingLevel = () => "medium",
-): ToolDefinition<typeof SummonParams, SummonDetails | undefined> {
+  runtime: ImpRuntime,
+  getThinking: () => ThinkingLevel,
+): ToolDefinition<typeof SummonParams, { name: string } | undefined> {
   return {
     name: "summon",
     label: "Summon Imp",
     description:
-      "Summon an imp — an isolated background agent with its own session. Returns immediately with a name; use `wait` to collect results. The imp has no access to the delegator's conversation, so the `task` must be self-contained.",
+      "Summon an imp in a Herdr-owned Pi workspace. Returns immediately after deterministic checks with a name; use wait to collect the result.",
     promptSnippet: "Summon an imp for background task delegation",
-    promptGuidelines: ["You can summon multiple imps (including parallel tool calls), then wait for all or first."],
+    promptGuidelines: ["You can summon multiple imps in parallel, then use wait with mode all or first."],
     parameters: SummonParams,
-    async execute(
-      _toolCallId: string,
-      params: { task: string; agent?: string; model?: string; thinking?: ThinkingLevel },
-      _signal: AbortSignal | undefined,
-      _onUpdate: AgentToolUpdateCallback | undefined,
-      ctx: ExtensionContext,
-    ) {
-      const name = namePool.allocate();
-
-      // Resolve agent config
-      let config: AgentConfig | undefined;
-      let agent: string | undefined;
-      if (params.agent) {
-        config = agents.find((a) => a.name === params.agent);
-        if (!config) {
-          namePool.release(name);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Unknown agent: ${params.agent}. Available: ${agents.map((a) => a.name).join(", ") || "none"}`,
-              },
-            ],
-            details: undefined,
-          };
-        }
-        agent = config.name;
-      }
-
-      const parentModel = ctx.model;
-      if (!parentModel) {
-        namePool.release(name);
+    async execute(_id, params, _signal, _update, ctx) {
+      try {
+        const prepared = await runtime.prepare({
+          task: params.task,
+          requestedModel: params.model,
+          thinking: params.thinking ?? getThinking(),
+          trusted: ctx.isProjectTrusted(),
+          parentModel: ctx.model,
+          modelRegistry: ctx.modelRegistry,
+        });
+        const imp = runtime.summon(prepared, ctx.cwd);
         return {
-          content: [{ type: "text", text: "Failed to summon: no model available" }],
+          content: [{ type: "text", text: JSON.stringify({ name: imp.name }) }],
+          details: { name: imp.name },
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: "text", text: `Failed to summon: ${error instanceof Error ? error.message : String(error)}` },
+          ],
           details: undefined,
         };
       }
-
-      const requestedModel = params.model ?? config?.model;
-      let model = parentModel;
-      if (requestedModel) {
-        const available = ctx.modelRegistry.getAvailable();
-        const resolved = available.find(
-          (candidate) => candidate.name === requestedModel || candidate.id === requestedModel,
-        );
-        if (!resolved) {
-          namePool.release(name);
-          const modelNames = available.map((candidate) => candidate.name).join(", ");
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Model "${requestedModel}" is not available. Models: ${modelNames || "none"}`,
-              },
-            ],
-            details: undefined,
-          };
-        }
-        model = resolved;
-      }
-
-      const thinkingLevel = params.thinking ?? config?.thinking ?? getParentThinkingLevel();
-
-      // Create done promise for wait coordination
-      let resolveDone!: () => void;
-      const done = new Promise<void>((resolve) => {
-        resolveDone = resolve;
-      });
-
-      const controller = new AbortController();
-
-      const imp: Imp = {
-        name,
-        agent,
-        task: params.task,
-        status: "running",
-        startedAt: Date.now(),
-        turns: 0,
-        tokens: { input: 0, output: 0 },
-        controller,
-        done,
-        resolveDone,
-      };
-
-      imps.set(name, imp);
-
-      // Spawn session — fire and forget
-
-      spawnImpSession({
-        task: params.task,
-        config,
-        cwd: ctx.cwd,
-        model,
-        thinkingLevel,
-        modelRegistry: ctx.modelRegistry,
-        signal: controller.signal,
-        settings,
-        onTurnEnd: (turns) => {
-          imp.turns = turns;
-        },
-        onToolActivity: (activity) => {
-          imp.activity = activity;
-        },
-        onUsageUpdate: (tokens) => {
-          imp.tokens = tokens;
-        },
-        onComplete: (result) => {
-          if (imp.status === "dismissed") return; // already dismissed
-          imp.output = result.output;
-          imp.completedAt = Date.now();
-          if (result.truncated) {
-            imp.status = "truncated";
-          } else if (result.error) {
-            imp.status = "failed";
-            imp.error = result.error;
-          } else {
-            imp.status = "completed";
-          }
-          namePool.release(imp.name);
-          resolveDone();
-        },
-      })
-        .then((session) => {
-          if (imp.status === "dismissed") {
-            // Dismissed before session was ready — abort now
-            session.abort().catch(() => {});
-            return;
-          }
-          imp.session = session;
-        })
-        .catch((err) => {
-          if (imp.status === "dismissed") return; // already dismissed
-          imp.status = "failed";
-          imp.error = err instanceof Error ? err.message : String(err);
-          imp.completedAt = Date.now();
-          namePool.release(imp.name);
-          resolveDone();
-        });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ name, agent }),
-          },
-        ],
-        details: { name, agent },
-      };
     },
-    renderCall(args, theme: Theme, context) {
+    renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       text.setText(
         formatSummonCall(
           args.task,
-          args.agent,
           args.model,
           args.thinking,
           context.expanded,
@@ -247,288 +81,173 @@ export function summonTool(
       );
       return text;
     },
-    renderResult(result, _options, theme: Theme, context) {
-      const details = result.details as SummonDetails | undefined;
+    renderResult(result, _options, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      if (details) {
-        text.setText(formatSummonDisplay(details.name, details.agent, theme));
-      } else {
-        // Fallback (error cases)
-        const msg = result.content[0];
-        text.setText(msg?.type === "text" ? msg.text : "");
-      }
+      text.setText(
+        result.details
+          ? `${theme.fg("accent", result.details.name)} has answered your summons!`
+          : result.content[0]?.type === "text"
+            ? result.content[0].text
+            : "",
+      );
       return text;
     },
   };
 }
 
-// ─── wait ──────────────────────────────────────────────────────────────────
-
 const WaitParams = Type.Object({
-  mode: Type.Union([Type.Literal("all"), Type.Literal("first")], {
-    description: "all: wait for every imp, first: return when any completes",
-  }),
-  names: Type.Optional(
-    Type.Array(Type.String({ minLength: 1 }), {
-      description: "Wait for specific imps only (default: all uncollected)",
-    }),
-  ),
+  mode: Type.Union([Type.Literal("all"), Type.Literal("first")]),
+  names: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 
-interface WaitDetails {
-  imps: ImpSnapshot[];
+function aborted(signal: AbortSignal | undefined): Promise<"aborted"> | undefined {
+  if (!signal) return undefined;
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve("aborted");
+    else signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+  });
+}
+
+function eligible(runtime: ImpRuntime, names: Set<string> | undefined): Imp[] {
+  return [...runtime.imps.values()].filter((imp) => !names || names.has(imp.name));
 }
 
 export function waitTool(
-  imps: Map<string, Imp>,
-): ToolDefinition<typeof WaitParams, WaitDetails, { animationFrame: number }> {
+  runtime: ImpRuntime,
+): ToolDefinition<typeof WaitParams, { imps: ImpSnapshot[] }, { animationFrame: number }> {
   return {
     name: "wait",
     label: "Wait for Imps",
     description:
-      "Block until imps complete. `mode=all` waits for every uncollected imp; `mode=first` returns the first to finish. Each result includes `status` (`completed`, `failed`, `truncated`, or `dismissed`), `output`, and `error`.",
-    promptGuidelines: [
-      "Collected imps are removed from the session. wait({ mode: 'first' }) returns the first to complete; others keep running — call wait again or dismiss.",
-    ],
+      "Block until imps complete. all waits for every eligible imp; first returns one claimed result without cancelling the others.",
+    promptGuidelines: ["Collected imps are removed. After wait(first), call wait again or dismiss remaining imps."],
     parameters: WaitParams,
-    async execute(
-      _toolCallId: string,
-      params: { mode: "all" | "first"; names?: string[] },
-      signal: AbortSignal | undefined,
-      onUpdate: AgentToolUpdateCallback<WaitDetails> | undefined,
-      _ctx: ExtensionContext,
-    ): Promise<AgentToolResult<WaitDetails>> {
-      let waiting = uncollectedImps(imps);
-      if (params.names) {
-        const nameSet = new Set(params.names);
-        waiting = waiting.filter((imp) => nameSet.has(imp.name));
-      }
-
+    async execute(_id, params, signal, onUpdate): Promise<AgentToolResult<{ imps: ImpSnapshot[] }>> {
+      const names = params.names ? new Set(params.names) : undefined;
+      let waiting = eligible(runtime, names);
       if (waiting.length === 0) {
-        return {
-          content: [{ type: "text", text: "No uncollected imps to wait for." }],
-          details: { imps: [] },
-        };
+        return { content: [{ type: "text", text: "No uncollected imps to wait for." }], details: { imps: [] } };
       }
-
-      // Abort-aware awaiting: race imp completion against the tool call's abort signal
-      // so pi can shut down / cancel without deadlocking on a blocked wait.
-      const aborted = signal
-        ? new Promise<void>((resolve) => {
-            if (signal.aborted) {
-              resolve();
-              return;
-            }
-            signal.addEventListener("abort", () => resolve(), { once: true });
-          })
-        : null;
-
-      // Stream progress via onUpdate at intervals
-      const emitUpdate = () => {
-        if (!onUpdate) return;
-        onUpdate({
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(waiting.map(impToJson)),
-            },
-          ],
-          details: { imps: waiting.map(impToSnapshot) },
+      const abortPromise = aborted(signal);
+      const emit = () => {
+        waiting = eligible(runtime, names);
+        void runtime.refreshAll(waiting);
+        onUpdate?.({
+          content: [{ type: "text", text: JSON.stringify(waiting.map((imp) => impJson(imp))) }],
+          details: { imps: runtime.snapshots().filter((snapshot) => !names || names.has(snapshot.name)) },
         });
       };
-
-      const interval = setInterval(emitUpdate, 200);
-
-      // Also emit immediately
-      emitUpdate();
-
+      emit();
+      const interval = setInterval(emit, 200);
       try {
-        let resolved: Imp[];
-
+        const claimed: ImpSnapshot[] = [];
         if (params.mode === "all") {
-          const done = Promise.all(waiting.map((imp) => imp.done));
-          await (aborted ? Promise.race([done, aborted]) : done);
-          resolved = waiting.filter((imp) => imp.status !== "dismissed" && imp.status !== "running");
+          const outcome = await Promise.race([
+            Promise.all(waiting.map((imp) => imp.done)).then(() => "done" as const),
+            ...(abortPromise ? [abortPromise] : []),
+          ]);
+          if (outcome === "aborted" || signal?.aborted) return thisResult([]);
+          for (const imp of waiting) {
+            const snapshot = runtime.claim(imp);
+            if (snapshot && snapshot.status !== "dismissed") claimed.push(snapshot);
+          }
         } else {
-          // Race: resolve with the actual winner, not insertion order
-          const racePromises = waiting.map((imp) => imp.done.then(() => imp as Imp | undefined));
-          const winner = await Promise.race(
-            aborted ? [...racePromises, aborted.then(() => undefined as Imp | undefined)] : racePromises,
-          );
-          resolved = winner && winner.status !== "dismissed" ? [winner] : [];
+          for (;;) {
+            waiting = eligible(runtime, names);
+            if (waiting.length === 0) break;
+            const outcome = await Promise.race([
+              ...waiting.map((imp) => imp.done.then(() => imp)),
+              ...(abortPromise ? [abortPromise] : []),
+            ]);
+            if (outcome === "aborted" || signal?.aborted) return thisResult([]);
+            const snapshot = runtime.claim(outcome as Imp);
+            if (snapshot && snapshot.status !== "dismissed") {
+              claimed.push(snapshot);
+              break;
+            }
+          }
         }
-
-        // Remove collected imps from map (running imps stay for future wait calls)
-        for (const imp of resolved) {
-          imps.delete(imp.name);
-        }
-
-        // Final update
-        emitUpdate();
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(resolved.map(impToJson)),
-            },
-          ],
-          details: { imps: resolved.map(impToSnapshot) },
-        };
+        return thisResult(claimed);
       } finally {
         clearInterval(interval);
       }
     },
-    renderCall(args, theme: Theme, context) {
+    renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const mode = args.mode === "first" ? "race" : "all";
-      text.setText(`${theme.fg("toolTitle", theme.bold("wait"))} ${theme.fg("dim", mode)}`);
+      text.setText(
+        `${theme.fg("toolTitle", theme.bold("wait"))} ${theme.fg("dim", args.mode === "first" ? "race" : "all")}`,
+      );
       return text;
     },
-    renderResult(result, _options, theme: Theme, context) {
-      const mode = context.args?.mode ?? "all";
+    renderResult(result, _options, theme, context) {
       context.state.animationFrame = (context.state.animationFrame ?? 0) + 1;
-      const compact = formatWaitDisplay(result.details?.imps ?? [], mode, theme, context.state.animationFrame);
-      const text = (context.lastComponent as Text) ?? new Text("", 0, 0);
-      text.setText(compact);
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      text.setText(
+        formatWaitDisplay(result.details?.imps ?? [], context.args?.mode ?? "all", theme, context.state.animationFrame),
+      );
       return text;
     },
   };
 }
 
-// ─── dismiss ───────────────────────────────────────────────────────────────
-
-const DismissParams = Type.Object({
-  name: Type.String({ description: 'Imp name or "all"', minLength: 1 }),
-});
-
-interface DismissDetails {
-  names: string[];
+function thisResult(imps: ImpSnapshot[]): AgentToolResult<{ imps: ImpSnapshot[] }> {
+  return { content: [{ type: "text", text: JSON.stringify(imps.map(impJson)) }], details: { imps } };
 }
 
+const DismissParams = Type.Object({ name: Type.String({ minLength: 1 }) });
+
 export function dismissTool(
-  imps: Map<string, Imp>,
-  namePool: { allocate(): string; release(name: string): void },
-): ToolDefinition<typeof DismissParams, DismissDetails | undefined> {
+  runtime: ImpRuntime,
+): ToolDefinition<typeof DismissParams, { names: string[] } | undefined> {
   return {
     name: "dismiss",
     label: "Dismiss Imp",
-    description:
-      'Abort running imps and remove them from the session. Pass an imp name or "all". Completed imps are also removed.',
+    description: 'Dismiss a running or terminal uncollected imp. Pass an imp name or "all".',
     parameters: DismissParams,
-    async execute(
-      _toolCallId: string,
-      params: { name: string },
-      _signal: AbortSignal | undefined,
-      _onUpdate: AgentToolUpdateCallback | undefined,
-      _ctx: ExtensionContext,
-    ) {
-      const dismissed: Imp[] = [];
-
-      if (params.name === "all") {
-        for (const imp of imps.values()) {
-          if (imp.status === "running") {
-            dismissImp(imp, namePool);
-          }
-          dismissed.push(imp);
-        }
-        imps.clear();
-      } else {
-        const imp = findImp(imps, params.name);
-        if (!imp) {
-          return {
-            content: [{ type: "text", text: `No imp found: ${params.name}` }],
-            details: undefined,
-          };
-        }
-        if (imp.status === "running") {
-          dismissImp(imp, namePool);
-        }
-        imps.delete(imp.name);
-        dismissed.push(imp);
+    async execute(_id, params) {
+      if (params.name !== "all" && !runtime.imps.has(params.name)) {
+        return { content: [{ type: "text", text: `No imp found: ${params.name}` }], details: undefined };
       }
-
+      const names = runtime.dismiss(params.name);
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              dismissed: dismissed.map((i) => i.name),
-            }),
-          },
-        ],
-        details: { names: dismissed.map((i) => i.name) },
+        content: [{ type: "text", text: JSON.stringify({ dismissed: names }) }],
+        details: { names },
       };
     },
-    renderResult(result, _options, theme: Theme, context) {
+    renderResult(result, _options, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const details = result.details as DismissDetails | undefined;
-      if (details && details.names.length > 0) {
-        text.setText(
-          theme.fg("dim", "Dismissed ") + details.names.map((n) => theme.fg("accent", n)).join(theme.fg("dim", ", ")),
-        );
-      } else {
-        const msg = result.content[0];
-        text.setText(theme.fg("dim", msg?.type === "text" ? msg.text : ""));
-      }
+      text.setText(
+        result.details?.names.length
+          ? `${theme.fg("dim", "Dismissed ")}${result.details.names.map((name) => theme.fg("accent", name)).join(", ")}`
+          : theme.fg("dim", result.content[0]?.type === "text" ? result.content[0].text : ""),
+      );
       return text;
     },
   };
 }
 
-function dismissImp(imp: Imp, namePool: { release(name: string): void }): void {
-  imp.status = "dismissed";
-  imp.completedAt = Date.now();
-  imp.controller.abort();
-  imp.session?.abort().catch(() => {});
-  imp.resolveDone();
-  namePool.release(imp.name);
-}
+const ListParams = Type.Object({});
 
-// ─── list_imps ─────────────────────────────────────────────────────────────
-
-const ListImpsParams = Type.Object({});
-
-export function listImpsTool(imps: Map<string, Imp>): ToolDefinition<typeof ListImpsParams, ImpSnapshot[]> {
+export function listImpsTool(runtime: ImpRuntime): ToolDefinition<typeof ListParams, ImpSnapshot[]> {
   return {
     name: "list_imps",
     label: "List Imps",
-    description: "List running and recently completed imps with status and basic stats.",
-    promptGuidelines: ["Shows status only, not imp output. Use wait to collect full results."],
-    parameters: ListImpsParams,
-    async execute(
-      _toolCallId: string,
-      _params: Record<string, never>,
-      _signal: AbortSignal | undefined,
-      _onUpdate: AgentToolUpdateCallback | undefined,
-      _ctx: ExtensionContext,
-    ): Promise<AgentToolResult<ImpSnapshot[]>> {
-      const all = allImps(imps);
-      const text = JSON.stringify(all.map(impToJson));
-      return {
-        content: [{ type: "text", text }],
-        details: all.map(impToSnapshot),
-      };
+    description: "List running and recently completed imps with current on-demand Herdr state and bridge statistics.",
+    promptGuidelines: ["list_imps shows status only; use wait to collect full results."],
+    parameters: ListParams,
+    async execute() {
+      await runtime.refreshAll();
+      const snapshots = runtime.snapshots();
+      return { content: [{ type: "text", text: JSON.stringify(snapshots.map(impJson)) }], details: snapshots };
     },
     renderResult(result, _options, theme: Theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const details = result.details ?? [];
-      if (details.length === 0) {
-        text.setText(theme.fg("dim", "No imps."));
-      } else {
-        text.setText(details.map((imp) => formatImpStatusDisplay(imp, theme, imp.name.charCodeAt(0))).join("\n"));
-      }
+      text.setText(
+        result.details?.length
+          ? result.details.map((imp, index) => formatImpStatusDisplay(imp, theme, index)).join("\n")
+          : theme.fg("dim", "No imps."),
+      );
       return text;
     },
   };
-}
-
-// ─── helpers for shutdown ──────────────────────────────────────────────────
-
-export function dismissAllImps(imps: Map<string, Imp>, namePool: { release(name: string): void }): void {
-  for (const imp of imps.values()) {
-    if (imp.status === "running") {
-      dismissImp(imp, namePool);
-    }
-  }
 }

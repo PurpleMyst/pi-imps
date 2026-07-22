@@ -1,165 +1,150 @@
-# pi-imps Design
+# pi-imps Herdr Design
 
-## Problem
+## Goal and supported versions
 
-Orchestrating multiple isolated agent sessions from a single parent session is useful — parallel research, divide-and-conquer implementation, review alongside building. But existing solutions over-engineer the problem with dashboards, analytics, delegation nag systems, config ceremony, and TUI widgets that belong in separate extensions.
+Each imp is a Pi process and PTY owned by Herdr. The extension preserves the direct-task behavior of `summon`, `wait`, `dismiss`, and `list_imps`; named-agent selection and all named-agent configuration are removed.
 
-We need a small, composable primitive: summon an agent, get its result, done.
+Required versions:
 
-## Principles
+- Herdr client/server `0.7.5`, protocol `17`;
+- Herdr Pi integration `v6`;
+- Pi `>=0.81.1 <0.82.0`.
 
-1. **Minimal core** — summon, wait, dismiss. Everything else is optional or external.
-2. **Low config** — sensible defaults, minimal setup. Configuration lives in `~/.pi/agent/imps.json` (optional). Agent frontmatter is the per-agent configuration surface.
-3. **Composable** — other extensions can build on top. Don't bake in observability chrome, custom renderers, or delegation strategies.
-4. **No recursion** — imps are leaf workers. Only the parent session spawns imps. Enforced by not loading pi-imps on child sessions — imp tools are never registered, nothing to filter out.
-5. **Quiet** — no injected messages, no delegation reminders, no rotating hints. The LLM decides when to delegate based on its system prompt.
+The initial release guarantees cooperative cleanup. Recovery after a hard parent crash or power loss is out of scope.
 
-## Core API Surface
+## Public contract
 
-### Tools (LLM-callable)
+- `summon({ task, model?, thinking? })` returns without waiting for workspace creation, child readiness, prompting, or completion. First-use prerequisites and deterministic validation run before a name is allocated.
+- A returned name denotes one task and one terminal result. Later launch failures are stored as `failed` results.
+- `wait` supports `all`, `first`, and optional name filters. `first` never cancels other imps. Concurrent callers cannot collect the same imp.
+- Names remain reserved until collection or dismissal.
+- `dismiss` removes running or terminal uncollected imps. Dismissing a terminal imp discards its result without changing its status.
+- Session replacement, reload, and cooperative shutdown stop and clean every owned worker.
+- Results preserve the latest finalized assistant message's text blocks concatenated in order without separators. Provider failures preserve partial text and return `failed`; turn-limit results return `truncated`.
+- Child Pi processes cannot invoke `summon`, `wait`, `dismiss`, or `list_imps`.
 
-#### `summon`
+## Imp resources and identities
 
-Summon an imp. Returns immediately with a generated name. Non-blocking — the imp runs in the background.
+Each imp has:
 
-```
-summon({
-  task: string,           // what the imp should do
-  agent?: string,         // named agent, or ephemeral
-  model?: string,         // override the agent or parent model
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
-                           // override the agent or parent thinking level
-}) → { name: string }
-```
+- a public in-memory record and generated public name;
+- a random owner ID, launch ID, nonce, and lowercase Herdr agent name;
+- a uniquely labelled `pi-imp-<public-name>-<launch-id>` workspace;
+- a private mode-0700 runtime directory, mode-0600 manifest, and Unix socket;
+- the child bridge extension; and
+- an idempotent memoized cleanup promise.
 
-The LLM can call `summon` multiple times (including parallel tool calls) to launch several imps, then collect results with `wait`.
+Public and Herdr identities are separate. Workspace and agent responses are accepted only when their recorded workspace, pane, label, and internal agent identity match the imp.
 
-No auto-delivery — the LLM must explicitly call `wait` to collect results. If it never waits, results are visible via `list_imps` but not injected into context.
+Herdr starts the workspace with `PI_IMPS_CHILD=1` and `PI_IMPS_MANIFEST=<absolute path>`. When `PI_IMPS_CHILD=1`, the main extension returns before registering any tools, hooks, prompt text, or UI. Pi resource discovery otherwise remains normal; the tool allowlist is not an extension sandbox.
 
-#### `wait`
+## Prerequisites and deterministic validation
 
-Block until imps complete. Streams live progress into the tool call UI via `AgentToolUpdateCallback` — the user sees imp activity (tool calls, turns, status) in real time without extra widgets.
+The first summon in a parent session performs one shared check:
 
-```
-wait({
-  mode: "all" | "first",  // all: wait for every imp, first: return when any completes
-  names?: string[],        // optional: wait for specific imps only (default: all uncollected)
-}) → result(s)
-```
-
-`all` = Promise.all — wait for everything, return all results.
-`first` = Promise.race — return the first imp to complete, others keep running.
-
-When `names` is provided, `wait` targets only those imps. When omitted, it targets all uncollected imps in the current session. Collected imps are removed from the session — subsequent `wait` calls skip them.
-
-`wait` is chainable. After `wait({ mode: "first" })` returns one result, call `wait` again to collect the rest.
-
-Imp failures are returned as results with `failed` status, not thrown exceptions. The LLM sees which imps succeeded and which failed (with error message) and decides how to proceed. If no uncollected imps exist, `wait` returns an empty result.
-
-The result payload is the imp's final assistant message — no summarization or truncation. The delegator controls verbosity through its task description (e.g. "summarize briefly" vs "full analysis").
-
-#### `dismiss`
-
-Dismiss running imp(s). Useful after `wait({ mode: "first" })` to kill remaining imps.
-
-```
-dismiss({
-  name: string,           // imp name or "all"
-})
+```text
+herdr --version
+herdr status server --json
+herdr integration status
+pi --version
 ```
 
-#### `list_imps`
+It requires the supported client/server versions, protocol, running compatible server, structurally parsed `pi: current (v6)` integration entry (a trailing path is allowed), and supported Pi version. It never installs or updates software. Integration errors direct the user to:
 
-List running and recently completed imps with status and basic stats.
-
-### Scoping
-
-All imp state is session-scoped. `wait`/`dismiss`/`list_imps` only see imps from the current session. Session switch or shutdown dismisses all running imps.
-
-### Agent Discovery
-
-Scan global (`~/.pi/agent/agents/`) and project-local (`.pi/agents/`) directories for agent `.md` files with YAML frontmatter.
-
-### System Prompt
-
-Available agents are injected into the system prompt at session start, matching pi's pattern for skills (XML block).
-
-### Footer
-
-Running imp count in the status line. Minimal — just the count.
-
-### Imp Sessions
-
-Ephemeral, in-memory, no persistence. Model and thinking level resolve independently at summon time:
-
-1. Explicit `summon` override
-2. Named agent frontmatter (`model` / `thinking`)
-3. Parent session's active model / thinking level
-
-This gives named agents reusable defaults while allowing both named and ephemeral imps to be configured per invocation. Requested models must be available in the parent's model registry. Thinking accepts pi's levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
-
-### Tools
-
-Configurable at three levels:
-
-- **Settings** (`~/.pi/agent/imps.json`): default tool allowlist and per-agent additive tools
-- **Agent frontmatter**: per-agent baseline tools
-- **Project config** (`.pi/imps.json`): per-agent additive tools scoped to this project
-
-Resolution at summon time:
-
-1. Determine the **base allowlist**:
-   - Named agent with `tools` in frontmatter → use frontmatter tools
-   - Named agent without `tools` → use settings `toolAllowlist` (or undefined = all tools)
-   - Ephemeral imp → use settings `toolAllowlist` (or undefined = all tools)
-2. Compute **additive tools**: union of `agents.<key>.tools` from global `imps.json` and project `.pi/imps.json`, where `<key>` is the agent name (or `"_"` for ephemeral imps)
-3. Merge: if base is undefined (all tools), result is undefined (all tools) — additive tools are redundant since all tools are already available. If base is defined, result is `base ∪ additive`.
-4. Filter extensions: exclude any that provide no tools in the final allowlist
-
-Absence of frontmatter `tools` means the imp inherits the same tools as the parent session (no filtering applied). An empty list (`tools: []`) means no tools. Additive tools can only expand the base, never restrict it.
-
-If a tool name in the config doesn't correspond to a registered tool, it's silently ignored — the imp simply doesn't get that tool. (Future: surface a warning to the user.)
-
-**Additional extensions** (global `imps.json` only, `additionalExtensions` key) always load on imp sessions regardless of the tool allowlist. Use for permission systems, sandboxing, logging, or other extensions that must not be filtered out. Agent frontmatter and project config cannot override this.
-
-#### Project-level imps.json
-
-Project config lives at `.pi/imps.json` (project root). Both project and global `~/.pi/agent/imps.json` can contain an `agents` object with per-agent tool grants. Their `tools` arrays are unioned (not overridden) — if global grants `["a"]` and project grants `["b"]`, the agent gets both.
-
-```json
-{
-  "agents": {
-    "mason": { "tools": ["run_tests", "run_checks"] },
-    "sentinel": { "tools": ["run_tests", "run_checks"] }
-  }
-}
+```text
+herdr integration install pi
 ```
 
-This allows projects to grant agents access to project-specific tools (e.g. armory tools like `run_tests`) without modifying global agent definitions.
+Successful preflight is cached. A later Herdr version, protocol, integration, socket, or server-availability error invalidates it.
 
-For ephemeral (unnamed) imps, use the key `"_"`:
+Before allocating a public name, the extension validates:
 
-```json
-{
-  "agents": {
-    "_": { "tools": ["run_tests"] }
-  }
-}
+- no NUL in the task and at most 64 KiB UTF-8;
+- absolute runtime paths and a portable Unix-socket path bound;
+- model resolution and policy;
+- tool and settings resolution.
+
+## Model, tools, and trust
+
+Model source order is explicit `summon.model`, then the current parent model. Available candidates come from `ctx.modelRegistry.getAvailable()` and canonicalize to `provider/id`.
+
+Requested values match exact canonical ID, then exact candidate ID, then exact candidate name. At every tier, a raw match denied by policy fails immediately rather than falling through. Allowed matches are deduplicated by canonical ID; multiple canonical matches are ambiguous.
+
+Optional global `modelPatterns` in `~/.pi/agent/imps.json` is a case-sensitive, whole-string canonical model allowlist. Only `*` and `?` are wildcards. Omission permits all models; `[]` permits none. Project configuration cannot broaden it.
+
+The child always receives canonical `provider/model`. Tool selection is tri-state after removing the four imp tools:
+
+| Resolved tools | Pi arguments |
+| --- | --- |
+| `undefined` | no selection argument |
+| `[]` | `--no-tools` |
+| non-empty | `--tools <comma-separated>` |
+
+Every child also receives `--exclude-tools summon,wait,dismiss,list_imps`, `--no-session`, the selected thinking level, the bridge extension, and `--approve` or `--no-approve` captured from `ctx.isProjectTrusted()` at summon time.
+
+## Launch and prompting
+
+The parent creates the socket listener before the workspace. It creates one Herdr workspace rooted at the parent's cwd, then invokes `herdr agent start` with argument arrays, `--kind pi`, the root pane, and child Pi arguments.
+
+Workspace creation, interactive agent start, and authenticated bridge readiness share one absolute 60-second deadline. `agent start` retries only `agent_pane_busy`, every 250 ms, for at most five seconds and never beyond the shared deadline. Herdr's start timeout must remain greater than 3000 ms; launch fails rather than extending the deadline.
+
+The task is not a Pi startup argument. After both Herdr interactive readiness and bridge `ready`, the parent submits:
+
+```text
+herdr agent prompt NAME TASK --wait --until idle --until done
 ```
 
+Its successful identity-matched response is the only Herdr completion signal. `blocked` is display state, not completion, and there is no task wall-clock timeout.
 
-### Turn Limit
+Herdr state is refreshed only for `list_imps`, active wait progress, and brief dismissal cleanup. Per-imp refreshes are single-flight and cached for about one second. They are display/diagnostic data and never settle a result.
 
-A global safety net to prevent runaway imps. Default: 30 turns. Configurable in settings, not per-summon.
+## Child bridge protocol
 
-The imp is unaware of the limit. It works normally until the final turn, when a directive is injected:
+The bridge connects during `session_start` and closes idempotently in `session_shutdown`. Newline-delimited JSON is authenticated by protocol version, owner ID, launch ID, and random nonce. The first message is `ready` and includes the exact child Pi version, which must satisfy the supported range. Exactly one connection is accepted.
 
-> FINAL TURN. Do not start new work. Save any pending changes, commit your progress, and respond with: (1) what you completed, (2) what remains unfinished.
+Messages are:
 
-After that turn the session ends. The result returned to the delegator carries a `truncated` status (distinct from `completed` or `failed`), so the LLM knows the imp was cut off and can decide whether to re-delegate the remainder.
+- `ready`: protocol and identity;
+- `tool`: sanitized short activity preview;
+- `turn`: monotonic cumulative turns and input/output usage;
+- `result`: complete immutable terminal result;
+- `error`: fatal bridge failure that cannot produce a result.
 
-The limit is a circuit breaker, not a budget. It exists to catch genuine runaways — loops, wrong approaches, hallucination spirals — not to manage workflow. If an imp hits the limit, the task was too broad or under-specified; decompose it or tighten the prompt rather than raising the limit.
-### Names
+Telemetry lines are limited to 64 KiB and `result` to 16 MiB. UTF-8, identity, counters, size, and status invariants are validated. The first valid result is immutable; duplicate results are protocol diagnostics and cannot replace it.
 
-Generated per imp, recycled when freed.
+Statuses:
 
+- `completed`: exact latest finalized assistant text;
+- `failed`: exact partial text and provider error;
+- `truncated`: exact final allowed-turn text.
+
+At turn `limit - 1`, the bridge steers the final-turn directive. At turn `limit`, it publishes and drains the truncated result before calling Pi's supported `ctx.abort()` API. A valid truncated result terminalizes immediately; Herdr settlement is cleanup.
+
+## Terminalization, collection, and dismissal
+
+One first-write-wins terminal compare-and-set governs each imp.
+
+`completed` and provider `failed` require both a validated bridge result and successful identity-matched prompt response. The counterpart has three seconds to arrive after the first signal; otherwise the imp receives a stable coordination failure. `truncated` requires only its validated bridge result. `dismissed` can win only while running. Later protocol errors are diagnostics.
+
+Every wait mode and dismissal uses one synchronous claim operation. Claim verifies map identity, atomically removes the record, releases the name, and returns a frozen snapshot. An aborted wait claims nothing. A `wait(first)` loser re-evaluates eligible imps and returns empty if none remain.
+
+Running dismissal publishes local `dismissed`, resolves local completion, claims/removes the imp, then starts asynchronous interruption. Terminal dismissal preserves and discards the existing result and returns the name.
+
+## Cleanup and shutdown
+
+Cleanup is memoized and idempotent:
+
+1. abort active Herdr CLI commands;
+2. send `esc` only to an identity-matched live agent;
+3. briefly wait for idle or disappearance;
+4. close only the identity-matched owned workspace;
+5. close the socket;
+6. remove the runtime directory.
+
+Cleanup promises are tracked independently of the public map. Cooperative shutdown uses one shared promise and one absolute 65-second barrier for quit, reload, new/resume, fork/clone, and other session replacement flows. The extension never stops the Herdr server.
+
+A hard parent crash can leave workspaces. Identify labels beginning `pi-imp-` with `herdr workspace list`, inspect them, and close the relevant ID with `herdr workspace close <id>`. Automatic orphan reconciliation is deliberately deferred.
+
+## Verification
+
+Unit tests use fake command runners and temporary Unix sockets, never Herdr. They cover prerequisite parsing/caching, model policy, tool/trust arguments, validation, launch coordination, bridge authentication and limits, exact results, collection races, cancellation, dismissal, refresh isolation, and cleanup memoization. An optional live suite may cover representative no-tool/tool, visibility, race, dismissal, denial, provider-failure, and cooperative-cleanup cases.

@@ -1,60 +1,30 @@
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildAgentsBlock, discoverAgents } from "./agents.js";
-import { createNamePool } from "./names.js";
+import { ImpRuntime } from "./runtime.js";
 import { loadImpSettings } from "./settings.js";
-import { runningImps } from "./state.js";
-import { dismissAllImps, dismissTool, listImpsTool, summonTool, waitTool } from "./tools.js";
-import type { AgentConfig, Imp } from "./types.js";
+import { dismissTool, listImpsTool, summonTool, waitTool } from "./tools.js";
 
-export default function (pi: ExtensionAPI): void {
-  const imps: Map<string, Imp> = new Map();
-  const namePool = createNamePool();
-  const agents: AgentConfig[] = [];
-  // Cached once per session_start; empty string means no agents.
-  let agentsBlock = "";
+export default function piImps(pi: ExtensionAPI): void {
+  if (process.env.PI_IMPS_CHILD === "1") return;
 
-  // ── Agent discovery ────────────────────────────────────────────────────
-
-  pi.on("session_start", (_event, ctx) => {
-    const discovered = discoverAgents(ctx.cwd);
-    agents.splice(0, agents.length, ...discovered);
-    agentsBlock = buildAgentsBlock(discovered);
+  const runtime = new ImpRuntime({
+    settings: loadImpSettings(),
+    bridgePath: fileURLToPath(new URL("./child-bridge.ts", import.meta.url)),
   });
 
-  // ── System prompt injection ────────────────────────────────────────────
+  const updateStatus = (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) => {
+    const running = [...runtime.imps.values()].filter((imp) => imp.status === "running").length;
+    ctx.ui.setStatus("imps", running ? `${running} imp${running === 1 ? "" : "s"}` : undefined);
+  };
 
-  pi.on("before_agent_start", (event) => {
-    if (!agentsBlock) return;
-    return { systemPrompt: `${event.systemPrompt}\n\n${agentsBlock}` };
-  });
+  pi.on("session_start", (_event, ctx) => updateStatus(ctx));
+  pi.on("turn_start", (_event, ctx) => updateStatus(ctx));
+  pi.on("turn_end", (_event, ctx) => updateStatus(ctx));
+  pi.on("tool_execution_end", (_event, ctx) => updateStatus(ctx));
+  pi.on("session_shutdown", async () => runtime.shutdown());
 
-  // ── Footer: running imp count ──────────────────────────────────────────
-
-  function updateFooter(ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) {
-    const count = runningImps(imps).length;
-    ctx.ui.setStatus("imps", count > 0 ? `${count} imp${count !== 1 ? "s" : ""}` : undefined);
-  }
-
-  pi.on("turn_start", (_event, ctx) => updateFooter(ctx));
-  pi.on("turn_end", (_event, ctx) => updateFooter(ctx));
-  pi.on("tool_execution_end", (_event, ctx) => updateFooter(ctx));
-
-  // ── Cleanup on shutdown / session switch ────────────────────────────────
-
-  pi.on("session_before_switch", () => {
-    dismissAllImps(imps, namePool);
-    imps.clear();
-  });
-
-  pi.on("session_shutdown", () => {
-    dismissAllImps(imps, namePool);
-    imps.clear();
-  });
-
-  // ── Tools ──────────────────────────────────────────────────────────────
-
-  pi.registerTool(summonTool(imps, agents, namePool, loadImpSettings(), () => pi.getThinkingLevel()));
-  pi.registerTool(waitTool(imps));
-  pi.registerTool(dismissTool(imps, namePool));
-  pi.registerTool(listImpsTool(imps));
+  pi.registerTool(summonTool(runtime, () => pi.getThinkingLevel()));
+  pi.registerTool(waitTool(runtime));
+  pi.registerTool(dismissTool(runtime));
+  pi.registerTool(listImpsTool(runtime));
 }
